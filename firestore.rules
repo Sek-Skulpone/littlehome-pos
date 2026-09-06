@@ -1,0 +1,38 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Menu items shown to customers on the ordering page and managed from the staff page.
+    // No login system exists yet, so writes are open to anyone with the site link.
+    match /menu/{itemId} {
+      allow read: if true;
+      allow write: if request.resource.data.keys().hasAll(['name', 'price', 'category', 'available'])
+        && request.resource.data.name is string
+        && request.resource.data.price is number
+        && request.resource.data.price >= 0
+        && request.resource.data.category is string
+        && request.resource.data.available is bool;
+    }
+
+    // Customer orders. Anyone can place an order (no login for customers).
+    // Updates are limited to status/updatedAt so a customer can't rewrite items/total after the fact.
+    match /orders/{orderId} {
+      allow read: if true;
+      allow create: if request.resource.data.status == 'new'
+        && request.resource.data.items is list
+        && request.resource.data.items.size() > 0
+        && request.resource.data.total is number
+        && request.resource.data.total >= 0;
+      allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+        && request.resource.data.status in ['new', 'preparing', 'ready', 'done', 'cancelled'];
+      allow delete: if false;
+    }
+
+    // Daily counters used only to hand out short, friendly order numbers (e.g. "#7").
+    match /counters/{counterId} {
+      allow read: if true;
+      allow write: if request.resource.data.keys().hasOnly(['count']) && request.resource.data.count is number;
+    }
+  }
+}

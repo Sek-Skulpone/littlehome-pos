@@ -1,0 +1,1201 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Little Homie POS - หลังร้าน</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Kanit', 'sans-serif'],
+                    },
+                    colors: {
+                        coffee: {
+                            50: '#fdf8f6', 100: '#f2e8e5', 200: '#e8d5ce', 300: '#d3b2a7',
+                            400: '#b78776', 500: '#9c6252', 600: '#874f41', 700: '#703e33',
+                            800: '#5c342b', 900: '#4c2d26', 950: '#281512',
+                        },
+                        amberGold: '#d97706',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Kanit', sans-serif;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+            -webkit-user-select: none;
+            background-color: #f7f3f0;
+        }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.03); }
+        ::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.15); border-radius: 10px; }
+        .stamp-animation { animation: stampPop 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+        @keyframes stampPop {
+            0% { transform: scale(2.5) rotate(-15deg); opacity: 0; }
+            100% { transform: scale(1) rotate(0deg); opacity: 1; }
+        }
+        .pop-in { animation: popIn 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+        @keyframes popIn {
+            0% { transform: scale(0.9); opacity: 0; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+    </style>
+</head>
+<body class="bg-stone-100 text-stone-800 antialiased min-h-screen">
+    <div id="root"></div>
+
+    <script>
+        const firebaseConfig = {
+            apiKey: "AIzaSyA2U4eZyXhKjkPG3Ow8jgaMoKEOGYfknDQ",
+            authDomain: "littlehome-pos.firebaseapp.com",
+            projectId: "littlehome-pos",
+            storageBucket: "littlehome-pos.firebasestorage.app",
+            messagingSenderId: "763353161948",
+            appId: "1:763353161948:web:37eaa7c9b312acbb069419"
+        };
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+    </script>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        const playSound = (type) => {
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+
+                if (type === 'stamp') {
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+                    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.1);
+                    gain.gain.setValueAtTime(0.3, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
+                    osc.start(); osc.stop(ctx.currentTime + 0.15);
+                } else if (type === 'redeem') {
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(523.25, ctx.currentTime);
+                    osc.frequency.setValueAtTime(659.25, ctx.currentTime + 0.1);
+                    osc.frequency.setValueAtTime(783.99, ctx.currentTime + 0.2);
+                    gain.gain.setValueAtTime(0.3, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35);
+                    osc.start(); osc.stop(ctx.currentTime + 0.35);
+                } else if (type === 'tap') {
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(400, ctx.currentTime);
+                    gain.gain.setValueAtTime(0.08, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.05);
+                    osc.start(); osc.stop(ctx.currentTime + 0.05);
+                } else if (type === 'alert') {
+                    osc.type = 'square';
+                    osc.frequency.setValueAtTime(660, ctx.currentTime);
+                    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.12);
+                    osc.frequency.setValueAtTime(660, ctx.currentTime + 0.24);
+                    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
+                    osc.start(); osc.stop(ctx.currentTime + 0.4);
+                }
+            } catch (e) {
+                console.log("Audio not supported or allowed yet");
+            }
+        };
+
+        const INITIAL_CUSTOMERS = [
+            { id: '1', phone: '0819876543', name: 'คุณสมชาย ใจดี', points: 8, totalEarned: 18, lastVisit: '2026-09-05 14:20' },
+            { id: '2', phone: '0891234567', name: 'คุณพลอย สุขสรรค์', points: 10, totalEarned: 30, lastVisit: '2026-09-06 10:15' },
+            { id: '3', phone: '0923456789', name: 'คุณกิตติพงษ์', points: 3, totalEarned: 3, lastVisit: '2026-09-04 08:30' },
+        ];
+
+        const INITIAL_REWARDS = [
+            { id: 'r1', name: 'ฟรี! กาแฟ/เครื่องดื่ม 1 แก้ว (เมนูใดก็ได้)', pointsRequired: 10, icon: 'coffee' },
+            { id: 'r2', name: 'ส่วนลด 50 บาท', pointsRequired: 5, icon: 'tag' },
+            { id: 'r3', name: 'ฟรี! เบเกอรี่/ขนมหวาน 1 ชิ้น', pointsRequired: 12, icon: 'cake' }
+        ];
+
+        const CATEGORY_ICONS = {
+            'กาแฟ': 'coffee',
+            'เครื่องดื่มอื่นๆ': 'cup-soda',
+            'เบเกอรี่': 'cake',
+        };
+
+        const ORDER_STATUS_LABEL = {
+            new: 'ใหม่', preparing: 'กำลังทำ', ready: 'พร้อมเสิร์ฟ', done: 'เสร็จแล้ว', cancelled: 'ยกเลิก',
+        };
+
+        function timeAgo(timestamp) {
+            if (!timestamp) return 'เมื่อสักครู่';
+            const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+            const mins = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000));
+            if (mins < 1) return 'เมื่อสักครู่';
+            if (mins < 60) return `${mins} นาทีที่แล้ว`;
+            return `${Math.floor(mins / 60)} ชม. ${mins % 60} นาทีที่แล้ว`;
+        }
+
+        function App() {
+            const [activeTab, setActiveTab] = useState('orders'); // 'orders', 'pos', 'customers', 'history', 'menu', 'settings'
+            const [customers, setCustomers] = useState(() => {
+                const saved = localStorage.getItem('coffee_customers');
+                return saved ? JSON.parse(saved) : INITIAL_CUSTOMERS;
+            });
+            const [rewards, setRewards] = useState(() => {
+                const saved = localStorage.getItem('coffee_rewards');
+                return saved ? JSON.parse(saved) : INITIAL_REWARDS;
+            });
+            const [history, setHistory] = useState(() => {
+                const saved = localStorage.getItem('coffee_history');
+                return saved ? JSON.parse(saved) : [
+                    { id: 'h1', time: '2026-09-06 10:15', customerName: 'คุณพลอย สุขสรรค์', phone: '0891234567', type: 'ADD', amount: 1, note: 'สะสมแต้ม (+1)' },
+                    { id: 'h2', time: '2026-09-05 14:20', customerName: 'คุณสมชาย ใจดี', phone: '0819876543', type: 'ADD', amount: 2, note: 'สะสมแต้ม (+2)' }
+                ];
+            });
+
+            const [phoneInput, setPhoneInput] = useState('');
+            const [selectedCustomer, setSelectedCustomer] = useState(null);
+            const [showNewCustomerModal, setShowNewCustomerModal] = useState(false);
+            const [newCustomerName, setNewCustomerName] = useState('');
+            const [showRedeemModal, setShowRedeemModal] = useState(false);
+            const [notification, setNotification] = useState(null);
+            const [maxStampsPerCard, setMaxStampsPerCard] = useState(10);
+
+            const [orders, setOrders] = useState([]);
+            const [menuItems, setMenuItems] = useState([]);
+            const seenOrderIds = useRef(null);
+
+            useEffect(() => {
+                localStorage.setItem('coffee_customers', JSON.stringify(customers));
+            }, [customers]);
+
+            useEffect(() => {
+                localStorage.setItem('coffee_rewards', JSON.stringify(rewards));
+            }, [rewards]);
+
+            useEffect(() => {
+                localStorage.setItem('coffee_history', JSON.stringify(history));
+            }, [history]);
+
+            useEffect(() => {
+                if (window.lucide) {
+                    window.lucide.createIcons();
+                }
+            });
+
+            // Live orders feed; pings a sound when a genuinely new order arrives (not on first load).
+            useEffect(() => {
+                const unsub = db.collection('orders').orderBy('createdAt', 'desc').limit(100)
+                    .onSnapshot((snap) => {
+                        const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                        if (seenOrderIds.current === null) {
+                            seenOrderIds.current = new Set(list.map(o => o.id));
+                        } else {
+                            const hasNew = list.some(o => o.status === 'new' && !seenOrderIds.current.has(o.id));
+                            if (hasNew) playSound('alert');
+                            seenOrderIds.current = new Set(list.map(o => o.id));
+                        }
+                        setOrders(list);
+                    });
+                return unsub;
+            }, []);
+
+            useEffect(() => {
+                const unsub = db.collection('menu').orderBy('sortOrder').onSnapshot((snap) => {
+                    setMenuItems(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+                });
+                return unsub;
+            }, []);
+
+            const showToast = (msg, type = 'success') => {
+                setNotification({ msg, type });
+                setTimeout(() => setNotification(null), 3000);
+            };
+
+            const formatPhone = (val) => {
+                if (!val) return '';
+                const clean = val.replace(/\D/g, '');
+                if (clean.length <= 3) return clean;
+                if (clean.length <= 6) return `${clean.slice(0, 3)}-${clean.slice(3)}`;
+                return `${clean.slice(0, 3)}-${clean.slice(3, 6)}-${clean.slice(6, 10)}`;
+            };
+
+            const handleNumpad = (digit) => {
+                playSound('tap');
+                if (digit === 'del') {
+                    setPhoneInput(prev => prev.slice(0, -1));
+                } else if (digit === 'clear') {
+                    setPhoneInput('');
+                    setSelectedCustomer(null);
+                } else {
+                    if (phoneInput.length < 10) {
+                        const updated = phoneInput + digit;
+                        setPhoneInput(updated);
+                        if (updated.length === 10) {
+                            const found = customers.find(c => c.phone === updated);
+                            if (found) setSelectedCustomer(found);
+                        }
+                    }
+                }
+            };
+
+            const handleSearchCustomer = () => {
+                if (!phoneInput) return;
+                const cleanPhone = phoneInput.replace(/\D/g, '');
+                const found = customers.find(c => c.phone === cleanPhone);
+                if (found) {
+                    setSelectedCustomer(found);
+                    showToast(`พบข้อมูลสมาชิก: ${found.name}`);
+                } else {
+                    setSelectedCustomer(null);
+                    setShowNewCustomerModal(true);
+                }
+            };
+
+            const handleAddPoints = (amount = 1) => {
+                if (!selectedCustomer) return;
+                playSound('stamp');
+                const now = new Date();
+                const timeString = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+
+                const updatedCustomers = customers.map(c => {
+                    if (c.id === selectedCustomer.id) {
+                        const newPoints = c.points + amount;
+                        const newEarned = c.totalEarned + amount;
+                        const updated = { ...c, points: newPoints, totalEarned: newEarned, lastVisit: timeString };
+                        setSelectedCustomer(updated);
+                        return updated;
+                    }
+                    return c;
+                });
+                setCustomers(updatedCustomers);
+
+                const newLog = {
+                    id: 'h_' + Date.now(),
+                    time: timeString,
+                    customerName: selectedCustomer.name,
+                    phone: selectedCustomer.phone,
+                    type: 'ADD',
+                    amount: amount,
+                    note: `สะสมแต้ม (+${amount})`
+                };
+                setHistory([newLog, ...history]);
+                showToast(`สะสมแต้มสำเร็จ (+${amount} แต้ม)`);
+            };
+
+            const handleRegisterCustomer = (e) => {
+                e.preventDefault();
+                if (!phoneInput || !newCustomerName) return;
+                const cleanPhone = phoneInput.replace(/\D/g, '');
+                if (customers.some(c => c.phone === cleanPhone)) {
+                    showToast('เบอร์โทรศัพท์นี้ถูกลงทะเบียนแล้ว', 'error');
+                    return;
+                }
+                const now = new Date();
+                const timeString = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+                const newCustomer = {
+                    id: 'c_' + Date.now(),
+                    phone: cleanPhone,
+                    name: newCustomerName,
+                    points: 1,
+                    totalEarned: 1,
+                    lastVisit: timeString
+                };
+                setCustomers([newCustomer, ...customers]);
+                setSelectedCustomer(newCustomer);
+                setShowNewCustomerModal(false);
+                setNewCustomerName('');
+                playSound('stamp');
+                showToast(`สมัครสมาชิกสำเร็จ! ได้รับแต้มต้อนรับ +1 แต้ม`);
+                setHistory([{
+                    id: 'h_' + Date.now(),
+                    time: timeString,
+                    customerName: newCustomer.name,
+                    phone: newCustomer.phone,
+                    type: 'ADD',
+                    amount: 1,
+                    note: 'สมัครสมาชิกใหม่ (+1 แต้มต้อนรับ)'
+                }, ...history]);
+            };
+
+            const handleRedeemReward = (reward) => {
+                if (!selectedCustomer || selectedCustomer.points < reward.pointsRequired) {
+                    showToast('แต้มสะสมไม่เพียงพอ', 'error');
+                    return;
+                }
+                playSound('redeem');
+                const now = new Date();
+                const timeString = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+                const updatedCustomers = customers.map(c => {
+                    if (c.id === selectedCustomer.id) {
+                        const newPoints = c.points - reward.pointsRequired;
+                        const updated = { ...c, points: newPoints, lastVisit: timeString };
+                        setSelectedCustomer(updated);
+                        return updated;
+                    }
+                    return c;
+                });
+                setCustomers(updatedCustomers);
+                setHistory([{
+                    id: 'h_' + Date.now(),
+                    time: timeString,
+                    customerName: selectedCustomer.name,
+                    phone: selectedCustomer.phone,
+                    type: 'REDEEM',
+                    amount: reward.pointsRequired,
+                    note: `แลกรางวัล: ${reward.name}`
+                }, ...history]);
+                setShowRedeemModal(false);
+                showToast(`แลกรางวัล "${reward.name}" สำเร็จ!`);
+            };
+
+            const updateOrderStatus = (order, status) => {
+                db.collection('orders').doc(order.id).update({
+                    status,
+                    updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+                }).catch(() => showToast('อัปเดตออเดอร์ไม่สำเร็จ', 'error'));
+            };
+
+            return (
+                <div className="flex flex-col md:flex-row h-screen max-h-screen overflow-hidden bg-stone-100">
+
+                    {notification && (
+                        <div className={`fixed top-4 right-4 z-50 px-5 py-3 rounded-2xl shadow-xl font-medium text-white transition-all transform duration-300 flex items-center space-x-2 ${
+                            notification.type === 'error' ? 'bg-red-500' : 'bg-emerald-600'
+                        }`}>
+                            <i data-lucide={notification.type === 'error' ? 'alert-circle' : 'check-circle'} className="w-5 h-5"></i>
+                            <span>{notification.msg}</span>
+                        </div>
+                    )}
+
+                    <aside className="w-full md:w-64 bg-stone-900 text-stone-200 flex flex-row md:flex-col justify-between p-3 md:p-5 shadow-2xl z-20 shrink-0 overflow-x-auto">
+                        <div className="flex items-center space-x-3 md:mb-8 shrink-0">
+                            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-amber-600 to-amber-500 flex items-center justify-center text-white shadow-lg">
+                                <i data-lucide="coffee" className="w-6 h-6"></i>
+                            </div>
+                            <div>
+                                <h1 className="font-bold text-base leading-tight text-white">Little Homie POS</h1>
+                                <p className="text-[11px] text-stone-400">ระบบหลังร้านลิทเทิลโฮมมี่</p>
+                            </div>
+                        </div>
+
+                        <nav className="flex flex-row md:flex-col space-x-1 md:space-x-0 md:space-y-2">
+                            <NavButton active={activeTab === 'orders'} onClick={() => setActiveTab('orders')} icon="clipboard-list" label="ออเดอร์" />
+                            <NavButton active={activeTab === 'pos'} onClick={() => setActiveTab('pos')} icon="plus-circle" label="บันทึกแต้ม (POS)" />
+                            <NavButton active={activeTab === 'customers'} onClick={() => setActiveTab('customers')} icon="users" label="รายชื่อลูกค้า" />
+                            <NavButton active={activeTab === 'history'} onClick={() => setActiveTab('history')} icon="history" label="ประวัติทำรายการ" />
+                            <NavButton active={activeTab === 'menu'} onClick={() => setActiveTab('menu')} icon="book-open" label="จัดการเมนู" />
+                            <NavButton active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} icon="gift" label="จัดการรางวัล" />
+                        </nav>
+
+                        <div className="hidden md:block pt-4 border-t border-stone-800 text-xs text-stone-500 text-center">
+                            <p>Little Homie Coffee</p>
+                            <p className="mt-1 text-[10px] text-stone-600">iPad &amp; iPhone Terminal Ready</p>
+                        </div>
+                    </aside>
+
+                    <main className="flex-1 overflow-y-auto p-4 md:p-8">
+                        {activeTab === 'orders' && (
+                            <OrdersBoardView orders={orders} onUpdateStatus={updateOrderStatus} />
+                        )}
+
+                        {activeTab === 'pos' && (
+                            <POSView
+                                phoneInput={phoneInput}
+                                setPhoneInput={setPhoneInput}
+                                handleNumpad={handleNumpad}
+                                handleSearchCustomer={handleSearchCustomer}
+                                selectedCustomer={selectedCustomer}
+                                setSelectedCustomer={setSelectedCustomer}
+                                handleAddPoints={handleAddPoints}
+                                setShowNewCustomerModal={setShowNewCustomerModal}
+                                setShowRedeemModal={setShowRedeemModal}
+                                formatPhone={formatPhone}
+                                maxStampsPerCard={maxStampsPerCard}
+                            />
+                        )}
+
+                        {activeTab === 'customers' && (
+                            <CustomersView
+                                customers={customers}
+                                formatPhone={formatPhone}
+                                onSelectCustomer={(c) => {
+                                    setSelectedCustomer(c);
+                                    setPhoneInput(c.phone);
+                                    setActiveTab('pos');
+                                }}
+                            />
+                        )}
+
+                        {activeTab === 'history' && (
+                            <HistoryView history={history} formatPhone={formatPhone} />
+                        )}
+
+                        {activeTab === 'menu' && (
+                            <MenuManageView menuItems={menuItems} showToast={showToast} />
+                        )}
+
+                        {activeTab === 'settings' && (
+                            <SettingsView
+                                rewards={rewards}
+                                setRewards={setRewards}
+                                showToast={showToast}
+                            />
+                        )}
+                    </main>
+
+                    {showNewCustomerModal && (
+                        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+                            <div className="bg-white rounded-3xl p-6 w-full max-w-md shadow-2xl border border-stone-100 transform transition-all animate-in fade-in zoom-in duration-200">
+                                <div className="flex justify-between items-center mb-5">
+                                    <div className="flex items-center space-x-2">
+                                        <div className="w-8 h-8 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center">
+                                            <i data-lucide="user-plus" className="w-5 h-5"></i>
+                                        </div>
+                                        <h3 className="text-lg font-bold text-stone-800">สมัครสมาชิกใหม่</h3>
+                                    </div>
+                                    <button onClick={() => setShowNewCustomerModal(false)} className="text-stone-400 hover:text-stone-600">
+                                        <i data-lucide="x" className="w-6 h-6"></i>
+                                    </button>
+                                </div>
+
+                                <form onSubmit={handleRegisterCustomer} className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs font-semibold text-stone-500 uppercase tracking-wider mb-1">เบอร์โทรศัพท์</label>
+                                        <input
+                                            type="text"
+                                            value={formatPhone(phoneInput)}
+                                            disabled
+                                            className="w-full bg-stone-100 border border-stone-200 rounded-2xl px-4 py-3 font-semibold text-stone-700 text-lg"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-stone-500 uppercase tracking-wider mb-1">ชื่อ - นามสกุล หรือ ชื่อเล่น</label>
+                                        <input
+                                            type="text"
+                                            required
+                                            placeholder="เช่น คุณสมชาย, น้องเมย์"
+                                            value={newCustomerName}
+                                            onChange={(e) => setNewCustomerName(e.target.value)}
+                                            className="w-full bg-white border border-stone-300 focus:border-amber-500 focus:ring-2 focus:ring-amber-200 outline-none rounded-2xl px-4 py-3 text-stone-800 text-lg"
+                                            autoFocus
+                                        />
+                                    </div>
+
+                                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 flex items-center space-x-3 text-amber-800 text-sm">
+                                        <i data-lucide="sparkles" className="w-5 h-5 shrink-0 text-amber-600"></i>
+                                        <span>รับสิทธิ์ฟรี! <strong>+1 แต้มต้อนรับ</strong> ทันทีหลังลงทะเบียน</span>
+                                    </div>
+
+                                    <div className="pt-3 flex space-x-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowNewCustomerModal(false)}
+                                            className="flex-1 py-3 px-4 border border-stone-200 rounded-2xl font-medium text-stone-600 hover:bg-stone-50"
+                                        >
+                                            ยกเลิก
+                                        </button>
+                                        <button
+                                            type="submit"
+                                            className="flex-1 py-3 px-4 bg-amber-600 hover:bg-amber-700 text-white rounded-2xl font-medium shadow-lg shadow-amber-600/30 active:scale-95 transition-all"
+                                        >
+                                            บันทึกข้อมูล
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {showRedeemModal && selectedCustomer && (
+                        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+                            <div className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl border border-stone-100 transform transition-all">
+                                <div className="flex justify-between items-center mb-4">
+                                    <div>
+                                        <h3 className="text-xl font-bold text-stone-800">แลกรับของรางวัล</h3>
+                                        <p className="text-xs text-stone-500">สำหรับ {selectedCustomer.name} (คงเหลือ {selectedCustomer.points} แต้ม)</p>
+                                    </div>
+                                    <button onClick={() => setShowRedeemModal(false)} className="text-stone-400 hover:text-stone-600">
+                                        <i data-lucide="x" className="w-6 h-6"></i>
+                                    </button>
+                                </div>
+
+                                <div className="space-y-3 max-h-96 overflow-y-auto py-2">
+                                    {rewards.map(reward => {
+                                        const canRedeem = selectedCustomer.points >= reward.pointsRequired;
+                                        return (
+                                            <div
+                                                key={reward.id}
+                                                className={`p-4 rounded-2xl border transition-all flex items-center justify-between ${
+                                                    canRedeem
+                                                        ? 'border-amber-200 bg-amber-50/60 hover:bg-amber-100/50'
+                                                        : 'border-stone-200 bg-stone-50 opacity-60'
+                                                }`}
+                                            >
+                                                <div className="flex items-center space-x-3">
+                                                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-white ${canRedeem ? 'bg-amber-600' : 'bg-stone-400'}`}>
+                                                        <i data-lucide={reward.icon || 'gift'} className="w-5 h-5"></i>
+                                                    </div>
+                                                    <div>
+                                                        <p className="font-semibold text-stone-800 text-sm">{reward.name}</p>
+                                                        <p className="text-xs font-medium text-amber-700">{reward.pointsRequired} แต้มสะสม</p>
+                                                    </div>
+                                                </div>
+                                                <button
+                                                    disabled={!canRedeem}
+                                                    onClick={() => handleRedeemReward(reward)}
+                                                    className={`px-4 py-2 rounded-xl text-xs font-semibold shadow-sm transition-all active:scale-95 ${
+                                                        canRedeem
+                                                            ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                                                            : 'bg-stone-300 text-stone-500 cursor-not-allowed'
+                                                    }`}
+                                                >
+                                                    {canRedeem ? 'แลกรางวัล' : 'แต้มไม่พอ'}
+                                                </button>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                <div className="mt-5 pt-3 border-t border-stone-100">
+                                    <button
+                                        onClick={() => setShowRedeemModal(false)}
+                                        className="w-full py-3 bg-stone-100 text-stone-700 font-medium rounded-2xl hover:bg-stone-200"
+                                    >
+                                        ปิดหน้าต่าง
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                </div>
+            );
+        }
+
+        function NavButton({ active, onClick, icon, label }) {
+            return (
+                <button
+                    onClick={onClick}
+                    className={`flex items-center space-x-3 px-4 py-3 rounded-2xl text-sm font-medium transition-all whitespace-nowrap ${
+                        active ? 'bg-amber-600 text-white shadow-md' : 'text-stone-400 hover:bg-stone-800 hover:text-stone-200'
+                    }`}
+                >
+                    <i data-lucide={icon} className="w-5 h-5"></i>
+                    <span className="hidden md:inline">{label}</span>
+                </button>
+            );
+        }
+
+        function OrdersBoardView({ orders, onUpdateStatus }) {
+            const columns = useMemo(() => ({
+                new: orders.filter(o => o.status === 'new'),
+                preparing: orders.filter(o => o.status === 'preparing'),
+                ready: orders.filter(o => o.status === 'ready'),
+                past: orders.filter(o => o.status === 'done' || o.status === 'cancelled').slice(0, 15),
+            }), [orders]);
+
+            const COLUMN_DEFS = [
+                { key: 'new', title: 'ใหม่', color: 'border-red-200 bg-red-50/50', nextLabel: 'เริ่มทำ', nextStatus: 'preparing' },
+                { key: 'preparing', title: 'กำลังทำ', color: 'border-amber-200 bg-amber-50/50', nextLabel: 'พร้อมเสิร์ฟ', nextStatus: 'ready' },
+                { key: 'ready', title: 'พร้อมเสิร์ฟ', color: 'border-emerald-200 bg-emerald-50/50', nextLabel: 'เสร็จสิ้น', nextStatus: 'done' },
+            ];
+
+            return (
+                <div className="h-full flex flex-col max-w-7xl mx-auto">
+                    <div className="mb-4">
+                        <h2 className="text-2xl font-bold text-stone-800">ออเดอร์ลูกค้า</h2>
+                        <p className="text-xs text-stone-400 mt-0.5">อัปเดตแบบเรียลไทม์จากหน้าสั่งซื้อของลูกค้า</p>
+                    </div>
+
+                    <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-4 overflow-y-auto pb-4">
+                        {COLUMN_DEFS.map(col => (
+                            <div key={col.key} className={`rounded-3xl border p-3 flex flex-col ${col.color} min-h-[200px]`}>
+                                <div className="flex items-center justify-between px-2 pb-2">
+                                    <h3 className="font-bold text-stone-700 text-sm">{col.title}</h3>
+                                    <span className="text-xs font-bold bg-white/70 px-2 py-0.5 rounded-full text-stone-500">{columns[col.key].length}</span>
+                                </div>
+                                <div className="space-y-3 overflow-y-auto max-h-[60vh]">
+                                    {columns[col.key].length === 0 && (
+                                        <p className="text-xs text-stone-400 text-center py-6">ไม่มีออเดอร์</p>
+                                    )}
+                                    {columns[col.key].map(order => (
+                                        <div key={order.id} className="bg-white rounded-2xl p-4 shadow-sm border border-stone-100 space-y-2 pop-in">
+                                            <div className="flex justify-between items-start">
+                                                <div>
+                                                    <p className="font-extrabold text-amber-700 text-lg leading-none">#{order.orderNumber}</p>
+                                                    <p className="text-xs text-stone-500 mt-1">
+                                                        {order.orderType === 'dine-in' ? `โต๊ะ ${order.tableNumber}` : 'กลับบ้าน'} · {order.customerName}
+                                                    </p>
+                                                </div>
+                                                <span className="text-[10px] text-stone-400">{timeAgo(order.createdAt)}</span>
+                                            </div>
+                                            <div className="text-xs text-stone-600 space-y-0.5 border-t border-stone-50 pt-2">
+                                                {order.items.map((item, idx) => (
+                                                    <div key={idx} className="flex justify-between">
+                                                        <span>{item.name} x{item.qty}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            {order.note && (
+                                                <p className="text-[11px] text-amber-700 bg-amber-50 rounded-lg px-2 py-1">หมายเหตุ: {order.note}</p>
+                                            )}
+                                            <div className="flex justify-between items-center pt-1">
+                                                <span className="text-sm font-bold text-stone-700">{order.total} บาท</span>
+                                                <div className="flex space-x-1.5">
+                                                    <button
+                                                        onClick={() => onUpdateStatus(order, 'cancelled')}
+                                                        className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium text-red-500 hover:bg-red-50"
+                                                    >
+                                                        ยกเลิก
+                                                    </button>
+                                                    <button
+                                                        onClick={() => onUpdateStatus(order, col.nextStatus)}
+                                                        className="px-3 py-1.5 rounded-lg text-xs font-bold bg-stone-800 hover:bg-stone-900 text-white active:scale-95 transition-all"
+                                                    >
+                                                        {col.nextLabel}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    {columns.past.length > 0 && (
+                        <details className="mt-2">
+                            <summary className="text-xs font-medium text-stone-400 cursor-pointer px-2">ประวัติล่าสุด ({columns.past.length})</summary>
+                            <div className="mt-2 bg-white rounded-2xl border border-stone-100 divide-y divide-stone-50 max-h-64 overflow-y-auto">
+                                {columns.past.map(order => (
+                                    <div key={order.id} className="p-3 flex justify-between items-center text-sm">
+                                        <span className="text-stone-600">#{order.orderNumber} · {order.customerName}</span>
+                                        <span className={`text-xs font-medium ${order.status === 'cancelled' ? 'text-red-500' : 'text-emerald-600'}`}>
+                                            {ORDER_STATUS_LABEL[order.status]}
+                                        </span>
+                                    </div>
+                                ))}
+                            </div>
+                        </details>
+                    )}
+                </div>
+            );
+        }
+
+        function MenuManageView({ menuItems, showToast }) {
+            const [name, setName] = useState('');
+            const [category, setCategory] = useState('');
+            const [price, setPrice] = useState('');
+
+            const categories = useMemo(() => {
+                const set = new Set(menuItems.map(m => m.category));
+                return Array.from(set);
+            }, [menuItems]);
+
+            const grouped = useMemo(() => {
+                const byCat = {};
+                menuItems.forEach(item => {
+                    if (!byCat[item.category]) byCat[item.category] = [];
+                    byCat[item.category].push(item);
+                });
+                return byCat;
+            }, [menuItems]);
+
+            const handleAdd = (e) => {
+                e.preventDefault();
+                if (!name || !category || !price) return;
+                const maxSort = menuItems.reduce((m, i) => Math.max(m, i.sortOrder || 0), 0);
+                db.collection('menu').add({
+                    name, category, price: parseFloat(price), available: true, sortOrder: maxSort + 1,
+                }).then(() => {
+                    setName(''); setCategory(''); setPrice('');
+                    showToast('เพิ่มเมนูสำเร็จ');
+                }).catch(() => showToast('เพิ่มเมนูไม่สำเร็จ', 'error'));
+            };
+
+            const toggleAvailable = (item) => {
+                db.collection('menu').doc(item.id).update({ available: !item.available }).catch(() => {});
+            };
+
+            const updateField = (item, field, value) => {
+                db.collection('menu').doc(item.id).update({ [field]: value }).catch(() => {});
+            };
+
+            const handleDelete = (item) => {
+                db.collection('menu').doc(item.id).delete().then(() => {
+                    showToast('ลบเมนูเรียบร้อยแล้ว');
+                }).catch(() => showToast('ลบเมนูไม่สำเร็จ', 'error'));
+            };
+
+            return (
+                <div className="max-w-4xl mx-auto space-y-6">
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
+                        <h2 className="text-2xl font-bold text-stone-800">จัดการเมนู</h2>
+                        <p className="text-xs text-stone-400 mt-0.5">เมนูที่นี่จะแสดงบนหน้าสั่งซื้อของลูกค้าแบบเรียลไทม์</p>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
+                        <h3 className="font-bold text-stone-800 mb-4 text-sm uppercase tracking-wider text-stone-500">+ เพิ่มเมนูใหม่</h3>
+                        <form onSubmit={handleAdd} className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+                            <input
+                                type="text" placeholder="ชื่อเมนู" value={name} onChange={e => setName(e.target.value)} required
+                                className="sm:col-span-4 bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                            />
+                            <input
+                                type="text" placeholder="หมวดหมู่ เช่น กาแฟ" value={category} onChange={e => setCategory(e.target.value)} required list="category-options"
+                                className="sm:col-span-4 bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                            />
+                            <datalist id="category-options">
+                                {categories.map(c => <option key={c} value={c} />)}
+                            </datalist>
+                            <input
+                                type="number" placeholder="ราคา" value={price} onChange={e => setPrice(e.target.value)} required min="0"
+                                className="sm:col-span-2 bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                            />
+                            <button type="submit" className="sm:col-span-2 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-2xl text-sm transition-all shadow-md shadow-amber-600/20 active:scale-95">
+                                เพิ่ม
+                            </button>
+                        </form>
+                    </div>
+
+                    {Object.keys(grouped).map(cat => (
+                        <div key={cat} className="space-y-3">
+                            <div className="flex items-center space-x-2 px-1">
+                                <i data-lucide={CATEGORY_ICONS[cat] || 'utensils'} className="w-4 h-4 text-amber-700"></i>
+                                <h3 className="font-bold text-stone-700 text-sm">{cat}</h3>
+                            </div>
+                            {grouped[cat].map(item => (
+                                <div key={item.id} className={`bg-white p-4 rounded-2xl shadow-sm border flex items-center justify-between gap-3 ${item.available === false ? 'opacity-60 border-stone-100' : 'border-stone-100'}`}>
+                                    <input
+                                        type="text" defaultValue={item.name}
+                                        onBlur={(e) => e.target.value !== item.name && updateField(item, 'name', e.target.value)}
+                                        className="flex-1 min-w-0 bg-transparent font-semibold text-stone-800 text-sm outline-none focus:bg-stone-50 rounded-lg px-1"
+                                    />
+                                    <input
+                                        type="number" defaultValue={item.price}
+                                        onBlur={(e) => Number(e.target.value) !== item.price && updateField(item, 'price', parseFloat(e.target.value) || 0)}
+                                        className="w-20 bg-transparent text-amber-700 font-semibold text-sm text-right outline-none focus:bg-stone-50 rounded-lg px-1"
+                                    />
+                                    <button
+                                        onClick={() => toggleAvailable(item)}
+                                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold shrink-0 ${item.available === false ? 'bg-stone-100 text-stone-500' : 'bg-emerald-100 text-emerald-700'}`}
+                                    >
+                                        {item.available === false ? 'หมด' : 'มีขาย'}
+                                    </button>
+                                    <button onClick={() => handleDelete(item)} className="p-2 text-stone-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all shrink-0">
+                                        <i data-lucide="trash-2" className="w-4 h-4"></i>
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    ))}
+                </div>
+            );
+        }
+
+        function POSView({
+            phoneInput, setPhoneInput, handleNumpad, handleSearchCustomer,
+            selectedCustomer, setSelectedCustomer, handleAddPoints,
+            setShowNewCustomerModal, setShowRedeemModal, formatPhone, maxStampsPerCard
+        }) {
+            return (
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 max-w-7xl mx-auto h-full">
+
+                    <div className="lg:col-span-5 flex flex-col space-y-4">
+                        <div className="bg-white rounded-3xl p-6 shadow-xl border border-stone-100/80">
+                            <label className="block text-xs font-bold uppercase tracking-wider text-stone-400 mb-2">
+                                ค้นหา หรือ ป้อนเบอร์โทรศัพท์ลูกค้า
+                            </label>
+
+                            <div className="relative mb-4">
+                                <input
+                                    type="text"
+                                    readOnly
+                                    value={formatPhone(phoneInput)}
+                                    placeholder="08X-XXX-XXXX"
+                                    className="w-full bg-stone-50 border-2 border-stone-200 rounded-2xl px-4 py-3 text-center text-2xl font-bold text-stone-800 tracking-wider focus:outline-none"
+                                />
+                                {phoneInput && (
+                                    <button
+                                        onClick={() => handleNumpad('clear')}
+                                        className="absolute right-3 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-stone-200 text-stone-600 flex items-center justify-center hover:bg-stone-300"
+                                    >
+                                        <i data-lucide="x" className="w-4 h-4"></i>
+                                    </button>
+                                )}
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-2 mb-4">
+                                {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map(num => (
+                                    <button
+                                        key={num}
+                                        onClick={() => handleNumpad(num)}
+                                        className="py-3 bg-stone-100 hover:bg-amber-100 hover:text-amber-900 text-stone-800 font-bold text-xl rounded-2xl shadow-sm active:scale-95 transition-all flex items-center justify-center"
+                                    >
+                                        {num}
+                                    </button>
+                                ))}
+                                <button
+                                    onClick={() => handleNumpad('clear')}
+                                    className="py-3 bg-red-50 hover:bg-red-100 text-red-600 font-semibold text-sm rounded-2xl active:scale-95 transition-all flex items-center justify-center"
+                                >
+                                    ล้าง
+                                </button>
+                                <button
+                                    onClick={() => handleNumpad('0')}
+                                    className="py-3 bg-stone-100 hover:bg-amber-100 hover:text-amber-900 text-stone-800 font-bold text-xl rounded-2xl shadow-sm active:scale-95 transition-all flex items-center justify-center"
+                                >
+                                    0
+                                </button>
+                                <button
+                                    onClick={() => handleNumpad('del')}
+                                    className="py-3 bg-stone-200 hover:bg-stone-300 text-stone-700 font-bold text-lg rounded-2xl active:scale-95 transition-all flex items-center justify-center"
+                                >
+                                    <i data-lucide="delete" className="w-6 h-6"></i>
+                                </button>
+                            </div>
+
+                            <button
+                                onClick={handleSearchCustomer}
+                                disabled={phoneInput.length < 9}
+                                className={`w-full py-3.5 rounded-2xl font-bold text-base shadow-lg transition-all flex items-center justify-center space-x-2 ${
+                                    phoneInput.length >= 9
+                                        ? 'bg-amber-600 hover:bg-amber-700 text-white shadow-amber-600/30 active:scale-95'
+                                        : 'bg-stone-200 text-stone-400 cursor-not-allowed'
+                                }`}
+                            >
+                                <i data-lucide="search" className="w-5 h-5"></i>
+                                <span>ค้นหาเบอร์โทรศัพท์</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="lg:col-span-7 flex flex-col justify-between">
+                        {selectedCustomer ? (
+                            <div className="bg-white rounded-3xl p-6 shadow-xl border border-stone-100 flex flex-col h-full justify-between space-y-6">
+
+                                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center pb-4 border-b border-stone-100 gap-3">
+                                    <div className="flex items-center space-x-3">
+                                        <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-800 font-bold text-xl flex items-center justify-center shadow-inner">
+                                            {selectedCustomer.name.slice(0, 2)}
+                                        </div>
+                                        <div>
+                                            <h2 className="text-xl font-bold text-stone-800">{selectedCustomer.name}</h2>
+                                            <p className="text-xs font-semibold text-stone-400">{formatPhone(selectedCustomer.phone)}</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center space-x-2">
+                                        <button
+                                            onClick={() => setSelectedCustomer(null)}
+                                            className="px-3 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-600 rounded-xl text-xs font-medium transition-all"
+                                        >
+                                            เปลี่ยนลูกค้า
+                                        </button>
+                                        <button
+                                            onClick={() => setShowRedeemModal(true)}
+                                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 active:scale-95 transition-all flex items-center space-x-1"
+                                        >
+                                            <i data-lucide="gift" className="w-4 h-4"></i>
+                                            <span>แลกของรางวัล</span>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="bg-gradient-to-br from-stone-900 to-stone-800 text-white rounded-3xl p-6 shadow-2xl relative overflow-hidden">
+                                    <div className="absolute right-0 bottom-0 opacity-10 pointer-events-none transform translate-x-4 translate-y-4">
+                                        <i data-lucide="coffee" className="w-48 h-48 text-white"></i>
+                                    </div>
+
+                                    <div className="flex justify-between items-center mb-6">
+                                        <div>
+                                            <span className="text-[10px] uppercase font-bold tracking-widest text-amber-400">Little Homie Loyalty Card</span>
+                                            <h3 className="text-lg font-bold text-stone-100">บัตรสะสมแต้มดิจิทัล</h3>
+                                        </div>
+                                        <div className="text-right">
+                                            <span className="text-2xl font-extrabold text-amber-400">{selectedCustomer.points}</span>
+                                            <span className="text-xs text-stone-400"> แต้มสะสม</span>
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-5 gap-3 my-2">
+                                        {Array.from({ length: maxStampsPerCard }).map((_, index) => {
+                                            const isStamped = index < (selectedCustomer.points % maxStampsPerCard || (selectedCustomer.points > 0 && selectedCustomer.points % maxStampsPerCard === 0 ? maxStampsPerCard : 0));
+                                            return (
+                                                <div
+                                                    key={index}
+                                                    className={`aspect-square rounded-2xl flex flex-col items-center justify-center border-2 transition-all relative ${
+                                                        isStamped
+                                                            ? 'bg-amber-500 border-amber-400 text-stone-900 shadow-lg shadow-amber-500/40 stamp-animation'
+                                                            : 'bg-stone-800/80 border-stone-700/60 text-stone-600'
+                                                    }`}
+                                                >
+                                                    {isStamped ? (
+                                                        <i data-lucide="coffee" className="w-6 h-6 stroke-[2.5]"></i>
+                                                    ) : (
+                                                        <span className="text-xs font-bold text-stone-600">{index + 1}</span>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+
+                                    <div className="mt-4 pt-3 border-t border-stone-800 flex justify-between items-center text-[11px] text-stone-400">
+                                        <span>สะสมครบ {maxStampsPerCard} แต้ม รับเครื่องดื่มฟรี!</span>
+                                        <span>ยอดรวมทั้งหมด: {selectedCustomer.totalEarned} แต้ม</span>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-3">
+                                    <label className="block text-xs font-bold text-stone-500 uppercase tracking-wider">
+                                        บันทึกเพิ่มแต้มสะสม
+                                    </label>
+                                    <div className="grid grid-cols-3 gap-3">
+                                        <button
+                                            onClick={() => handleAddPoints(1)}
+                                            className="py-4 bg-amber-600 hover:bg-amber-700 text-white rounded-2xl font-bold shadow-lg shadow-amber-600/30 active:scale-95 transition-all flex flex-col items-center justify-center space-y-1"
+                                        >
+                                            <span className="text-xl">+1 แต้ม</span>
+                                            <span className="text-[11px] text-amber-100 font-normal">ซื้อ 1 แก้ว</span>
+                                        </button>
+                                        <button
+                                            onClick={() => handleAddPoints(2)}
+                                            className="py-4 bg-amber-700 hover:bg-amber-800 text-white rounded-2xl font-bold shadow-lg shadow-amber-700/30 active:scale-95 transition-all flex flex-col items-center justify-center space-y-1"
+                                        >
+                                            <span className="text-xl">+2 แต้ม</span>
+                                            <span className="text-[11px] text-amber-100 font-normal">ซื้อ 2 แก้ว</span>
+                                        </button>
+                                        <button
+                                            onClick={() => handleAddPoints(3)}
+                                            className="py-4 bg-amber-800 hover:bg-amber-900 text-white rounded-2xl font-bold shadow-lg shadow-amber-800/30 active:scale-95 transition-all flex flex-col items-center justify-center space-y-1"
+                                        >
+                                            <span className="text-xl">+3 แต้ม</span>
+                                            <span className="text-[11px] text-amber-100 font-normal">ซื้อ 3 แก้ว</span>
+                                        </button>
+                                    </div>
+                                </div>
+
+                            </div>
+                        ) : (
+                            <div className="bg-white rounded-3xl p-12 shadow-xl border border-stone-100 flex flex-col items-center justify-center text-center h-full space-y-4">
+                                <div className="w-20 h-20 bg-stone-100 rounded-3xl flex items-center justify-center text-stone-400">
+                                    <i data-lucide="user-search" className="w-10 h-10"></i>
+                                </div>
+                                <div>
+                                    <h3 className="text-lg font-bold text-stone-800">กรอกเบอร์โทรศัพท์ลูกค้า</h3>
+                                    <p className="text-stone-400 text-sm max-w-xs mt-1">
+                                        พิมพ์เบอร์โทรศัพท์ที่แป้นพิมพ์ด้านซ้ายเพื่อค้นหา หรือ สมัครสมาชิกใหม่
+                                    </p>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                </div>
+            );
+        }
+
+        function CustomersView({ customers, formatPhone, onSelectCustomer }) {
+            const [searchTerm, setSearchTerm] = useState('');
+            const filtered = customers.filter(c =>
+                c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                c.phone.includes(searchTerm)
+            );
+
+            return (
+                <div className="max-w-6xl mx-auto space-y-6">
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
+                        <div>
+                            <h2 className="text-2xl font-bold text-stone-800">รายชื่อสมาชิกทั้งหมด</h2>
+                            <p className="text-xs text-stone-400 mt-0.5">รวมสมาชิกทั้งหมด {customers.length} คน</p>
+                        </div>
+
+                        <div className="relative w-full sm:w-72">
+                            <i data-lucide="search" className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-stone-400"></i>
+                            <input
+                                type="text"
+                                placeholder="ค้นหาชื่อ หรือ เบอร์โทร..."
+                                value={searchTerm}
+                                onChange={(e) => setSearchTerm(e.target.value)}
+                                className="w-full bg-stone-100 border-none rounded-2xl pl-10 pr-4 py-2.5 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {filtered.map(customer => (
+                            <div
+                                key={customer.id}
+                                onClick={() => onSelectCustomer(customer)}
+                                className="bg-white p-5 rounded-3xl shadow-sm border border-stone-100 hover:shadow-md transition-all cursor-pointer flex flex-col justify-between space-y-4 hover:border-amber-200 group"
+                            >
+                                <div className="flex justify-between items-start">
+                                    <div className="flex items-center space-x-3">
+                                        <div className="w-10 h-10 rounded-2xl bg-stone-100 text-stone-700 font-bold flex items-center justify-center group-hover:bg-amber-100 group-hover:text-amber-800 transition-colors">
+                                            {customer.name.slice(0, 2)}
+                                        </div>
+                                        <div>
+                                            <h3 className="font-bold text-stone-800">{customer.name}</h3>
+                                            <p className="text-xs text-stone-400 font-medium">{formatPhone(customer.phone)}</p>
+                                        </div>
+                                    </div>
+                                    <span className="px-3 py-1 bg-amber-50 text-amber-700 text-xs font-bold rounded-xl border border-amber-200">
+                                        {customer.points} แต้ม
+                                    </span>
+                                </div>
+
+                                <div className="flex justify-between items-center text-xs text-stone-400 pt-3 border-t border-stone-50">
+                                    <span>สะสมแล้วทั้งหมด: {customer.totalEarned}</span>
+                                    <span>ใช้งานล่าสุด: {customer.lastVisit ? customer.lastVisit.split(' ')[0] : '-'}</span>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        function HistoryView({ history, formatPhone }) {
+            return (
+                <div className="max-w-5xl mx-auto space-y-6">
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
+                        <h2 className="text-2xl font-bold text-stone-800">ประวัติการทำรายการ</h2>
+                        <p className="text-xs text-stone-400 mt-0.5">รายการสะสมและแลกแต้มย้อนหลัง</p>
+                    </div>
+
+                    <div className="bg-white rounded-3xl shadow-sm border border-stone-100 overflow-hidden">
+                        <div className="divide-y divide-stone-100">
+                            {history.map(item => (
+                                <div key={item.id} className="p-4 sm:p-5 flex items-center justify-between hover:bg-stone-50 transition-colors">
+                                    <div className="flex items-center space-x-4">
+                                        <div className={`w-10 h-10 rounded-2xl flex items-center justify-center text-white ${
+                                            item.type === 'ADD' ? 'bg-amber-600' : 'bg-emerald-600'
+                                        }`}>
+                                            <i data-lucide={item.type === 'ADD' ? 'plus' : 'gift'} className="w-5 h-5"></i>
+                                        </div>
+                                        <div>
+                                            <p className="font-bold text-stone-800 text-sm">{item.customerName}</p>
+                                            <p className="text-xs text-stone-400">{formatPhone(item.phone)} • {item.note}</p>
+                                        </div>
+                                    </div>
+                                    <div className="text-right">
+                                        <span className={`font-bold text-sm ${item.type === 'ADD' ? 'text-amber-700' : 'text-emerald-700'}`}>
+                                            {item.type === 'ADD' ? `+${item.amount}` : `-${item.amount}`} แต้ม
+                                        </span>
+                                        <p className="text-[11px] text-stone-400">{item.time}</p>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function SettingsView({ rewards, setRewards, showToast }) {
+            const [newRewardName, setNewRewardName] = useState('');
+            const [newRewardPts, setNewRewardPts] = useState('');
+
+            const handleAddReward = (e) => {
+                e.preventDefault();
+                if (!newRewardName || !newRewardPts) return;
+                const newR = {
+                    id: 'r_' + Date.now(),
+                    name: newRewardName,
+                    pointsRequired: parseInt(newRewardPts, 10),
+                    icon: 'gift'
+                };
+                setRewards([...rewards, newR]);
+                setNewRewardName('');
+                setNewRewardPts('');
+                showToast('เพิ่มรายการของรางวัลสำเร็จ');
+            };
+
+            const handleDeleteReward = (id) => {
+                setRewards(rewards.filter(r => r.id !== id));
+                showToast('ลบของรางวัลเรียบร้อยแล้ว');
+            };
+
+            return (
+                <div className="max-w-4xl mx-auto space-y-6">
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
+                        <h2 className="text-2xl font-bold text-stone-800">จัดการของรางวัล</h2>
+                        <p className="text-xs text-stone-400 mt-0.5">กำหนดรายการและจำนวนแต้มที่ใช้แลก</p>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
+                        <h3 className="font-bold text-stone-800 mb-4 text-sm uppercase tracking-wider text-stone-500">
+                            + เพิ่มของรางวัลใหม่
+                        </h3>
+                        <form onSubmit={handleAddReward} className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+                            <input
+                                type="text"
+                                placeholder="ชื่อของรางวัล (เช่น ฟรี ชาเขียวเย็น 1 แก้ว)"
+                                value={newRewardName}
+                                onChange={(e) => setNewRewardName(e.target.value)}
+                                required
+                                className="sm:col-span-7 bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                            />
+                            <input
+                                type="number"
+                                placeholder="จำนวนแต้ม"
+                                value={newRewardPts}
+                                onChange={(e) => setNewRewardPts(e.target.value)}
+                                required
+                                min="1"
+                                className="sm:col-span-3 bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                            />
+                            <button
+                                type="submit"
+                                className="sm:col-span-2 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-2xl text-sm transition-all shadow-md shadow-amber-600/20 active:scale-95"
+                            >
+                                เพิ่มรางวัล
+                            </button>
+                        </form>
+                    </div>
+
+                    <div className="space-y-3">
+                        {rewards.map(reward => (
+                            <div key={reward.id} className="bg-white p-5 rounded-3xl shadow-sm border border-stone-100 flex items-center justify-between">
+                                <div className="flex items-center space-x-3">
+                                    <div className="w-10 h-10 rounded-2xl bg-amber-100 text-amber-800 flex items-center justify-center">
+                                        <i data-lucide="gift" className="w-5 h-5"></i>
+                                    </div>
+                                    <div>
+                                        <h4 className="font-bold text-stone-800 text-sm">{reward.name}</h4>
+                                        <span className="text-xs text-amber-700 font-semibold">{reward.pointsRequired} แต้มสะสม</span>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => handleDeleteReward(reward.id)}
+                                    className="p-2.5 text-stone-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
+                                >
+                                    <i data-lucide="trash-2" className="w-5 h-5"></i>
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
