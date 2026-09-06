@@ -26,7 +26,13 @@
                             400: '#b78776', 500: '#9c6252', 600: '#874f41', 700: '#703e33',
                             800: '#5c342b', 900: '#4c2d26', 950: '#281512',
                         },
-                        amberGold: '#d97706',
+                        // Warm caramel-gold pulled from the shop logo, replacing Tailwind's
+                        // stock (more orange) amber so every existing amber-* class rethemes at once.
+                        amber: {
+                            50: '#faf3e7', 100: '#f3e2c4', 200: '#e8c88e', 300: '#dcac5c',
+                            400: '#ce9640', 500: '#bd8232', 600: '#a66b26', 700: '#8a5620',
+                            800: '#6e441c', 900: '#563617', 950: '#331f0d',
+                        },
                     }
                 }
             }
@@ -354,10 +360,8 @@
                         </div>
                     )}
 
-                    <header className="sticky top-0 z-30 bg-stone-900 text-white px-5 py-4 flex items-center space-x-3 shadow-md">
-                        <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-amber-600 to-amber-500 flex items-center justify-center shrink-0">
-                            <Icon name="coffee" className="w-6 h-6"></Icon>
-                        </div>
+                    <header className="sticky top-0 z-30 bg-coffee-950 text-white px-5 py-4 flex items-center space-x-3 shadow-md">
+                        <img src="logo.png" alt="Little Homie" className="w-12 h-12 rounded-full shadow-md shrink-0" />
                         <div>
                             <h1 className="font-bold text-base leading-tight">Little Homie Coffee</h1>
                             <p className="text-[11px] text-stone-400">สั่งเครื่องดื่ม &amp; ของทานเล่น</p>
@@ -651,7 +655,7 @@
 
                     <button
                         onClick={onNewOrder}
-                        className="w-full py-3.5 bg-stone-800 hover:bg-stone-900 text-white rounded-2xl font-medium transition-all active:scale-95"
+                        className="w-full py-3.5 bg-coffee-900 hover:bg-coffee-950 text-white rounded-2xl font-medium transition-all active:scale-95"
                     >
                         สั่งเพิ่ม / สั่งใหม่
                     </button>
