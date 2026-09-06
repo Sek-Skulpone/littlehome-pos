@@ -156,22 +156,19 @@
             return next;
         }
 
-        // Renders a lucide icon by drawing its SVG directly, instead of the library's global
-        // DOM-scanning createIcons() — that scan replaces <i> nodes out from under React and
-        // causes "removeChild" crashes whenever a re-render lands mid-scan.
+        // Renders a lucide icon via dangerouslySetInnerHTML computed at render time, instead of
+        // the library's global DOM-scanning createIcons() (which replaces <i> nodes out from
+        // under React) or an imperative ref+effect mutation (which can still race a fast-arriving
+        // re-render before the effect runs). Setting the HTML synchronously in the same render
+        // keeps the DOM fully inside React's own bookkeeping, so there's nothing left to race.
         function toPascalCase(str) {
             return str.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join('');
         }
         function Icon({ name, className = '' }) {
-            const ref = useRef(null);
-            useEffect(() => {
-                if (!ref.current || !window.lucide) return;
-                const iconData = window.lucide.icons[toPascalCase(name)];
-                if (!iconData) return;
-                ref.current.innerHTML = '';
-                ref.current.appendChild(window.lucide.createElement(iconData));
-            }, [name]);
-            return <span ref={ref} className={`inline-flex ${className}`}></span>;
+            const iconData = window.lucide && window.lucide.icons[toPascalCase(name)];
+            if (!iconData) return <span className={`inline-flex ${className}`}></span>;
+            const svg = window.lucide.createElement(iconData).outerHTML;
+            return <span className={`inline-flex ${className}`} dangerouslySetInnerHTML={{ __html: svg }}></span>;
         }
 
         function App() {
