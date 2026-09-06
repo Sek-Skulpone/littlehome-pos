@@ -7,12 +7,13 @@ service cloud.firestore {
     // No login system exists yet, so writes are open to anyone with the site link.
     match /menu/{itemId} {
       allow read: if true;
-      allow write: if request.resource.data.keys().hasAll(['name', 'price', 'category', 'available'])
+      allow create, update: if request.resource.data.keys().hasAll(['name', 'price', 'category', 'available'])
         && request.resource.data.name is string
         && request.resource.data.price is number
         && request.resource.data.price >= 0
         && request.resource.data.category is string
         && request.resource.data.available is bool;
+      allow delete: if true;
     }
 
     // Customer orders. Anyone can place an order (no login for customers).
