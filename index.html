@@ -156,6 +156,24 @@
             return next;
         }
 
+        // Renders a lucide icon by drawing its SVG directly, instead of the library's global
+        // DOM-scanning createIcons() — that scan replaces <i> nodes out from under React and
+        // causes "removeChild" crashes whenever a re-render lands mid-scan.
+        function toPascalCase(str) {
+            return str.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join('');
+        }
+        function Icon({ name, className = '' }) {
+            const ref = useRef(null);
+            useEffect(() => {
+                if (!ref.current || !window.lucide) return;
+                const iconData = window.lucide.icons[toPascalCase(name)];
+                if (!iconData) return;
+                ref.current.innerHTML = '';
+                ref.current.appendChild(window.lucide.createElement(iconData));
+            }, [name]);
+            return <span ref={ref} className={`inline-flex ${className}`}></span>;
+        }
+
         function App() {
             const [menu, setMenu] = useState([]);
             const [menuLoaded, setMenuLoaded] = useState(false);
@@ -170,10 +188,6 @@
             const [phone, setPhone] = useState('');
             const [note, setNote] = useState('');
             const lastReadyRef = useRef(null);
-
-            useEffect(() => {
-                if (window.lucide) window.lucide.createIcons();
-            });
 
             const showToast = (msg, type = 'success') => {
                 setNotification({ msg, type });
@@ -296,14 +310,14 @@
                         <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl shadow-xl font-medium text-white flex items-center space-x-2 ${
                             notification.type === 'error' ? 'bg-red-500' : 'bg-emerald-600'
                         }`}>
-                            <i data-lucide={notification.type === 'error' ? 'alert-circle' : 'check-circle'} className="w-5 h-5"></i>
+                            <Icon name={notification.type === 'error' ? 'alert-circle' : 'check-circle'} className="w-5 h-5"></Icon>
                             <span className="text-sm">{notification.msg}</span>
                         </div>
                     )}
 
                     <header className="sticky top-0 z-30 bg-stone-900 text-white px-5 py-4 flex items-center space-x-3 shadow-md">
                         <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-amber-600 to-amber-500 flex items-center justify-center shrink-0">
-                            <i data-lucide="coffee" className="w-6 h-6"></i>
+                            <Icon name="coffee" className="w-6 h-6"></Icon>
                         </div>
                         <div>
                             <h1 className="font-bold text-base leading-tight">Little Homie Coffee</h1>
@@ -364,7 +378,7 @@
             if (!menuLoaded) {
                 return (
                     <div className="flex flex-col items-center justify-center py-24 text-stone-400 space-y-3">
-                        <i data-lucide="loader" className="w-8 h-8 animate-spin"></i>
+                        <Icon name="loader" className="w-8 h-8 animate-spin"></Icon>
                         <p className="text-sm">กำลังโหลดเมนู...</p>
                     </div>
                 );
@@ -373,7 +387,7 @@
             if (categories.length === 0) {
                 return (
                     <div className="flex flex-col items-center justify-center py-24 text-stone-400 space-y-3 px-6 text-center">
-                        <i data-lucide="coffee" className="w-10 h-10"></i>
+                        <Icon name="coffee" className="w-10 h-10"></Icon>
                         <p className="text-sm">ร้านยังไม่ได้เพิ่มเมนู กรุณากลับมาใหม่อีกครั้ง</p>
                     </div>
                 );
@@ -384,7 +398,7 @@
                     {categories.map(cat => (
                         <div key={cat}>
                             <div className="flex items-center space-x-2 mb-2 px-1">
-                                <i data-lucide={CATEGORY_ICONS[cat] || 'utensils'} className="w-4 h-4 text-amber-700"></i>
+                                <Icon name={CATEGORY_ICONS[cat] || 'utensils'} className="w-4 h-4 text-amber-700"></Icon>
                                 <h2 className="font-bold text-stone-700 text-sm">{cat}</h2>
                             </div>
                             <div className="space-y-2">
@@ -406,16 +420,16 @@
                                                     onClick={() => changeQty(item.id, 1)}
                                                     className="shrink-0 w-10 h-10 rounded-xl bg-amber-600 hover:bg-amber-700 text-white flex items-center justify-center active:scale-90 transition-all"
                                                 >
-                                                    <i data-lucide="plus" className="w-5 h-5"></i>
+                                                    <Icon name="plus" className="w-5 h-5"></Icon>
                                                 </button>
                                             ) : (
                                                 <div className="shrink-0 flex items-center space-x-2 bg-amber-50 rounded-xl px-1.5 py-1.5">
                                                     <button onClick={() => changeQty(item.id, -1)} className="w-7 h-7 rounded-lg bg-white text-amber-700 flex items-center justify-center shadow-sm active:scale-90 transition-all">
-                                                        <i data-lucide="minus" className="w-4 h-4"></i>
+                                                        <Icon name="minus" className="w-4 h-4"></Icon>
                                                     </button>
                                                     <span className="w-5 text-center font-bold text-amber-800 text-sm">{qty}</span>
                                                     <button onClick={() => changeQty(item.id, 1)} className="w-7 h-7 rounded-lg bg-white text-amber-700 flex items-center justify-center shadow-sm active:scale-90 transition-all">
-                                                        <i data-lucide="plus" className="w-4 h-4"></i>
+                                                        <Icon name="plus" className="w-4 h-4"></Icon>
                                                     </button>
                                                 </div>
                                             )}
@@ -439,7 +453,7 @@
             return (
                 <div className="px-4 pt-4 pb-4 space-y-5">
                     <button onClick={onBack} className="flex items-center space-x-1.5 text-stone-500 text-sm font-medium">
-                        <i data-lucide="chevron-left" className="w-4 h-4"></i>
+                        <Icon name="chevron-left" className="w-4 h-4"></Icon>
                         <span>กลับไปเลือกเมนู</span>
                     </button>
 
@@ -453,11 +467,11 @@
                                 </div>
                                 <div className="shrink-0 flex items-center space-x-2 bg-stone-50 rounded-xl px-1.5 py-1.5">
                                     <button onClick={() => changeQty(item.menuId, -1)} className="w-7 h-7 rounded-lg bg-white text-stone-600 flex items-center justify-center shadow-sm active:scale-90">
-                                        <i data-lucide="minus" className="w-4 h-4"></i>
+                                        <Icon name="minus" className="w-4 h-4"></Icon>
                                     </button>
                                     <span className="w-5 text-center font-bold text-stone-700 text-sm">{item.qty}</span>
                                     <button onClick={() => changeQty(item.menuId, 1)} className="w-7 h-7 rounded-lg bg-white text-stone-600 flex items-center justify-center shadow-sm active:scale-90">
-                                        <i data-lucide="plus" className="w-4 h-4"></i>
+                                        <Icon name="plus" className="w-4 h-4"></Icon>
                                     </button>
                                 </div>
                             </div>
@@ -526,10 +540,10 @@
                         }`}
                     >
                         {submitting ? (
-                            <i data-lucide="loader" className="w-5 h-5 animate-spin"></i>
+                            <Icon name="loader" className="w-5 h-5 animate-spin"></Icon>
                         ) : (
                             <React.Fragment>
-                                <i data-lucide="send" className="w-5 h-5"></i>
+                                <Icon name="send" className="w-5 h-5"></Icon>
                                 <span>ยืนยันสั่งซื้อ ({cartTotal} บาท)</span>
                             </React.Fragment>
                         )}
@@ -564,7 +578,7 @@
                                                 <div className={`w-10 h-10 rounded-2xl flex items-center justify-center transition-all ${
                                                     active ? 'bg-amber-600 text-white' : 'bg-stone-100 text-stone-400'
                                                 }`}>
-                                                    <i data-lucide={active && idx < stepIndex ? 'check' : step.icon} className={`w-5 h-5 ${step.icon === 'loader' && idx === stepIndex ? 'animate-spin' : ''}`}></i>
+                                                    <Icon name={active && idx < stepIndex ? 'check' : step.icon} className={`w-5 h-5 ${step.icon === 'loader' && idx === stepIndex ? 'animate-spin' : ''}`}></Icon>
                                                 </div>
                                                 <span className={`text-[11px] text-center font-medium ${active ? 'text-amber-700' : 'text-stone-400'}`}>{step.label}</span>
                                             </div>
