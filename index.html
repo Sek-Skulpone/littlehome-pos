@@ -156,6 +156,38 @@
             return next;
         }
 
+        function timeString(date) {
+            return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+        }
+
+        // Best-effort membership tracking: the order itself already succeeded by the time this
+        // runs, so a failure here is swallowed by the caller rather than blocking the order.
+        async function upsertCustomerAfterOrder(phone, name, itemCount) {
+            const ref = db.collection('customers').doc(phone);
+            const visitTime = timeString(new Date());
+            return db.runTransaction(async (t) => {
+                const snap = await t.get(ref);
+                if (!snap.exists) {
+                    const data = {
+                        phone, name: name || '', points: 0, totalEarned: 0,
+                        totalDrinks: itemCount, orderCount: 1, lastVisit: visitTime,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    };
+                    t.set(ref, data);
+                    return data;
+                }
+                const data = snap.data();
+                const updated = {
+                    totalDrinks: (data.totalDrinks || 0) + itemCount,
+                    orderCount: (data.orderCount || 0) + 1,
+                    lastVisit: visitTime,
+                };
+                if (name && name !== data.name) updated.name = name;
+                t.update(ref, updated);
+                return { ...data, ...updated };
+            });
+        }
+
         // Renders a lucide icon via dangerouslySetInnerHTML computed at render time, instead of
         // the library's global DOM-scanning createIcons() (which replaces <i> nodes out from
         // under React) or an imperative ref+effect mutation (which can still race a fast-arriving
@@ -267,7 +299,17 @@
                     });
                     playSound('success');
                     lastReadyRef.current = null;
-                    setPlacedOrder({ id: docRef.id, orderNumber, status: 'new', items: cartItems, total: cartTotal });
+
+                    let memberTotalDrinks = null;
+                    const cleanPhone = phone.replace(/\D/g, '');
+                    if (cleanPhone) {
+                        try {
+                            const summary = await upsertCustomerAfterOrder(cleanPhone, customerName.trim(), cartItems.reduce((s, i) => s + i.qty, 0));
+                            memberTotalDrinks = summary.totalDrinks;
+                        } catch (e) { /* membership tracking is best-effort; the order already succeeded */ }
+                    }
+
+                    setPlacedOrder({ id: docRef.id, orderNumber, status: 'new', items: cartItems, total: cartTotal, memberTotalDrinks });
                     setView('confirm');
                     setCart({});
                 } catch (e) {
@@ -562,6 +604,11 @@
                         <p className="text-sm text-stone-500 mt-2">
                             {isCancelled ? 'ออเดอร์นี้ถูกยกเลิก' : isDone ? 'รับเรียบร้อยแล้ว ขอบคุณค่ะ/ครับ' : 'กรุณารอสักครู่นะคะ/ครับ'}
                         </p>
+                        {order.memberTotalDrinks != null && (
+                            <p className="text-xs text-amber-700 bg-amber-50 rounded-xl mt-3 py-1.5 px-3 inline-block">
+                                สั่งไปแล้วทั้งหมด {order.memberTotalDrinks} แก้ว
+                            </p>
+                        )}
                     </div>
 
                     {!isCancelled && (

@@ -35,5 +35,29 @@ service cloud.firestore {
       allow read: if true;
       allow write: if request.resource.data.keys().hasOnly(['count']) && request.resource.data.count is number;
     }
+
+    // Membership records keyed by phone number (the document id). Written both by the customer
+    // ordering page (auto drink-count tracking) and the staff POS (manual stamps/registration).
+    match /customers/{phone} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(
+          ['phone', 'name', 'points', 'totalEarned', 'totalDrinks', 'orderCount', 'lastVisit'])
+        && request.resource.data.phone is string
+        && request.resource.data.name is string
+        && request.resource.data.points is number
+        && request.resource.data.totalEarned is number
+        && request.resource.data.totalDrinks is number
+        && request.resource.data.orderCount is number;
+      allow delete: if false;
+    }
+
+    // Append-only log of manual stamp/redeem actions from the staff POS.
+    match /loyaltyEvents/{eventId} {
+      allow read: if true;
+      allow create: if request.resource.data.keys().hasAll(['phone', 'type', 'amount'])
+        && request.resource.data.type in ['ADD', 'REDEEM']
+        && request.resource.data.amount is number;
+      allow update, delete: if false;
+    }
   }
 }

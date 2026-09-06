@@ -118,10 +118,14 @@
         };
 
         const INITIAL_CUSTOMERS = [
-            { id: '1', phone: '0819876543', name: 'คุณสมชาย ใจดี', points: 8, totalEarned: 18, lastVisit: '2026-09-05 14:20' },
-            { id: '2', phone: '0891234567', name: 'คุณพลอย สุขสรรค์', points: 10, totalEarned: 30, lastVisit: '2026-09-06 10:15' },
-            { id: '3', phone: '0923456789', name: 'คุณกิตติพงษ์', points: 3, totalEarned: 3, lastVisit: '2026-09-04 08:30' },
+            { phone: '0819876543', name: 'คุณสมชาย ใจดี', points: 8, totalEarned: 18, totalDrinks: 18, orderCount: 9, lastVisit: '2026-09-05 14:20' },
+            { phone: '0891234567', name: 'คุณพลอย สุขสรรค์', points: 10, totalEarned: 30, totalDrinks: 30, orderCount: 14, lastVisit: '2026-09-06 10:15' },
+            { phone: '0923456789', name: 'คุณกิตติพงษ์', points: 3, totalEarned: 3, totalDrinks: 3, orderCount: 2, lastVisit: '2026-09-04 08:30' },
         ];
+
+        function timeString(date) {
+            return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+        }
 
         const INITIAL_REWARDS = [
             { id: 'r1', name: 'ฟรี! กาแฟ/เครื่องดื่ม 1 แก้ว (เมนูใดก็ได้)', pointsRequired: 10, icon: 'coffee' },
@@ -165,24 +169,16 @@
 
         function App() {
             const [activeTab, setActiveTab] = useState('orders'); // 'orders', 'pos', 'customers', 'history', 'menu', 'settings'
-            const [customers, setCustomers] = useState(() => {
-                const saved = localStorage.getItem('coffee_customers');
-                return saved ? JSON.parse(saved) : INITIAL_CUSTOMERS;
-            });
+            const [customers, setCustomers] = useState([]);
             const [rewards, setRewards] = useState(() => {
                 const saved = localStorage.getItem('coffee_rewards');
                 return saved ? JSON.parse(saved) : INITIAL_REWARDS;
             });
-            const [history, setHistory] = useState(() => {
-                const saved = localStorage.getItem('coffee_history');
-                return saved ? JSON.parse(saved) : [
-                    { id: 'h1', time: '2026-09-06 10:15', customerName: 'คุณพลอย สุขสรรค์', phone: '0891234567', type: 'ADD', amount: 1, note: 'สะสมแต้ม (+1)' },
-                    { id: 'h2', time: '2026-09-05 14:20', customerName: 'คุณสมชาย ใจดี', phone: '0819876543', type: 'ADD', amount: 2, note: 'สะสมแต้ม (+2)' }
-                ];
-            });
+            const [history, setHistory] = useState([]);
 
             const [phoneInput, setPhoneInput] = useState('');
-            const [selectedCustomer, setSelectedCustomer] = useState(null);
+            const [selectedPhone, setSelectedPhone] = useState(null);
+            const selectedCustomer = customers.find(c => c.id === selectedPhone) || null;
             const [showNewCustomerModal, setShowNewCustomerModal] = useState(false);
             const [newCustomerName, setNewCustomerName] = useState('');
             const [showRedeemModal, setShowRedeemModal] = useState(false);
@@ -194,16 +190,45 @@
             const seenOrderIds = useRef(null);
 
             useEffect(() => {
-                localStorage.setItem('coffee_customers', JSON.stringify(customers));
-            }, [customers]);
-
-            useEffect(() => {
                 localStorage.setItem('coffee_rewards', JSON.stringify(rewards));
             }, [rewards]);
 
+            // Membership records, keyed by phone (the doc id); shared with the customer ordering
+            // page so a walk-in stamp and an online order both land on the same member record.
             useEffect(() => {
-                localStorage.setItem('coffee_history', JSON.stringify(history));
-            }, [history]);
+                let seeded = false;
+                const unsub = db.collection('customers').onSnapshot((snap) => {
+                    if (snap.empty && !seeded) {
+                        seeded = true;
+                        const batch = db.batch();
+                        INITIAL_CUSTOMERS.forEach((c) => batch.set(db.collection('customers').doc(c.phone), c));
+                        batch.commit().catch(() => {});
+                        return;
+                    }
+                    setCustomers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+                });
+                return unsub;
+            }, []);
+
+            // Log of manual stamp/redeem actions from this POS (append-only).
+            useEffect(() => {
+                let seeded = false;
+                const unsub = db.collection('loyaltyEvents').orderBy('createdAt', 'desc').limit(100)
+                    .onSnapshot((snap) => {
+                        if (snap.empty && !seeded) {
+                            seeded = true;
+                            const batch = db.batch();
+                            [
+                                { time: '2026-09-06 10:15', customerName: 'คุณพลอย สุขสรรค์', phone: '0891234567', type: 'ADD', amount: 1, note: 'สะสมแต้ม (+1)' },
+                                { time: '2026-09-05 14:20', customerName: 'คุณสมชาย ใจดี', phone: '0819876543', type: 'ADD', amount: 2, note: 'สะสมแต้ม (+2)' },
+                            ].forEach((e) => batch.set(db.collection('loyaltyEvents').doc(), { ...e, createdAt: firebase.firestore.FieldValue.serverTimestamp() }));
+                            batch.commit().catch(() => {});
+                            return;
+                        }
+                        setHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+                    });
+                return unsub;
+            }, []);
 
             // Live orders feed; pings a sound when a genuinely new order arrives (not on first load).
             useEffect(() => {
@@ -248,14 +273,13 @@
                     setPhoneInput(prev => prev.slice(0, -1));
                 } else if (digit === 'clear') {
                     setPhoneInput('');
-                    setSelectedCustomer(null);
+                    setSelectedPhone(null);
                 } else {
                     if (phoneInput.length < 10) {
                         const updated = phoneInput + digit;
                         setPhoneInput(updated);
-                        if (updated.length === 10) {
-                            const found = customers.find(c => c.phone === updated);
-                            if (found) setSelectedCustomer(found);
+                        if (updated.length === 10 && customers.some(c => c.phone === updated)) {
+                            setSelectedPhone(updated);
                         }
                     }
                 }
@@ -266,10 +290,10 @@
                 const cleanPhone = phoneInput.replace(/\D/g, '');
                 const found = customers.find(c => c.phone === cleanPhone);
                 if (found) {
-                    setSelectedCustomer(found);
+                    setSelectedPhone(cleanPhone);
                     showToast(`พบข้อมูลสมาชิก: ${found.name}`);
                 } else {
-                    setSelectedCustomer(null);
+                    setSelectedPhone(null);
                     setShowNewCustomerModal(true);
                 }
             };
@@ -277,32 +301,20 @@
             const handleAddPoints = (amount = 1) => {
                 if (!selectedCustomer) return;
                 playSound('stamp');
-                const now = new Date();
-                const timeString = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-
-                const updatedCustomers = customers.map(c => {
-                    if (c.id === selectedCustomer.id) {
-                        const newPoints = c.points + amount;
-                        const newEarned = c.totalEarned + amount;
-                        const updated = { ...c, points: newPoints, totalEarned: newEarned, lastVisit: timeString };
-                        setSelectedCustomer(updated);
-                        return updated;
-                    }
-                    return c;
-                });
-                setCustomers(updatedCustomers);
-
-                const newLog = {
-                    id: 'h_' + Date.now(),
-                    time: timeString,
-                    customerName: selectedCustomer.name,
-                    phone: selectedCustomer.phone,
-                    type: 'ADD',
-                    amount: amount,
-                    note: `สะสมแต้ม (+${amount})`
-                };
-                setHistory([newLog, ...history]);
-                showToast(`สะสมแต้มสำเร็จ (+${amount} แต้ม)`);
+                const visitTime = timeString(new Date());
+                db.collection('customers').doc(selectedCustomer.id).update({
+                    points: firebase.firestore.FieldValue.increment(amount),
+                    totalEarned: firebase.firestore.FieldValue.increment(amount),
+                    lastVisit: visitTime,
+                }).then(() => {
+                    return db.collection('loyaltyEvents').add({
+                        customerName: selectedCustomer.name, phone: selectedCustomer.phone,
+                        type: 'ADD', amount, note: `สะสมแต้ม (+${amount})`,
+                        time: visitTime, createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    });
+                }).then(() => {
+                    showToast(`สะสมแต้มสำเร็จ (+${amount} แต้ม)`);
+                }).catch(() => showToast('บันทึกแต้มไม่สำเร็จ', 'error'));
             };
 
             const handleRegisterCustomer = (e) => {
@@ -313,31 +325,24 @@
                     showToast('เบอร์โทรศัพท์นี้ถูกลงทะเบียนแล้ว', 'error');
                     return;
                 }
-                const now = new Date();
-                const timeString = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+                const visitTime = timeString(new Date());
                 const newCustomer = {
-                    id: 'c_' + Date.now(),
-                    phone: cleanPhone,
-                    name: newCustomerName,
-                    points: 1,
-                    totalEarned: 1,
-                    lastVisit: timeString
+                    phone: cleanPhone, name: newCustomerName, points: 1, totalEarned: 1,
+                    totalDrinks: 0, orderCount: 0, lastVisit: visitTime,
+                    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
                 };
-                setCustomers([newCustomer, ...customers]);
-                setSelectedCustomer(newCustomer);
-                setShowNewCustomerModal(false);
-                setNewCustomerName('');
-                playSound('stamp');
-                showToast(`สมัครสมาชิกสำเร็จ! ได้รับแต้มต้อนรับ +1 แต้ม`);
-                setHistory([{
-                    id: 'h_' + Date.now(),
-                    time: timeString,
-                    customerName: newCustomer.name,
-                    phone: newCustomer.phone,
-                    type: 'ADD',
-                    amount: 1,
-                    note: 'สมัครสมาชิกใหม่ (+1 แต้มต้อนรับ)'
-                }, ...history]);
+                db.collection('customers').doc(cleanPhone).set(newCustomer).then(() => {
+                    setSelectedPhone(cleanPhone);
+                    setShowNewCustomerModal(false);
+                    setNewCustomerName('');
+                    playSound('stamp');
+                    showToast(`สมัครสมาชิกสำเร็จ! ได้รับแต้มต้อนรับ +1 แต้ม`);
+                    return db.collection('loyaltyEvents').add({
+                        customerName: newCustomer.name, phone: cleanPhone, type: 'ADD', amount: 1,
+                        note: 'สมัครสมาชิกใหม่ (+1 แต้มต้อนรับ)', time: visitTime,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    });
+                }).catch(() => showToast('สมัครสมาชิกไม่สำเร็จ', 'error'));
             };
 
             const handleRedeemReward = (reward) => {
@@ -346,29 +351,20 @@
                     return;
                 }
                 playSound('redeem');
-                const now = new Date();
-                const timeString = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-                const updatedCustomers = customers.map(c => {
-                    if (c.id === selectedCustomer.id) {
-                        const newPoints = c.points - reward.pointsRequired;
-                        const updated = { ...c, points: newPoints, lastVisit: timeString };
-                        setSelectedCustomer(updated);
-                        return updated;
-                    }
-                    return c;
-                });
-                setCustomers(updatedCustomers);
-                setHistory([{
-                    id: 'h_' + Date.now(),
-                    time: timeString,
-                    customerName: selectedCustomer.name,
-                    phone: selectedCustomer.phone,
-                    type: 'REDEEM',
-                    amount: reward.pointsRequired,
-                    note: `แลกรางวัล: ${reward.name}`
-                }, ...history]);
-                setShowRedeemModal(false);
-                showToast(`แลกรางวัล "${reward.name}" สำเร็จ!`);
+                const visitTime = timeString(new Date());
+                db.collection('customers').doc(selectedCustomer.id).update({
+                    points: firebase.firestore.FieldValue.increment(-reward.pointsRequired),
+                    lastVisit: visitTime,
+                }).then(() => {
+                    return db.collection('loyaltyEvents').add({
+                        customerName: selectedCustomer.name, phone: selectedCustomer.phone,
+                        type: 'REDEEM', amount: reward.pointsRequired, note: `แลกรางวัล: ${reward.name}`,
+                        time: visitTime, createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    });
+                }).then(() => {
+                    setShowRedeemModal(false);
+                    showToast(`แลกรางวัล "${reward.name}" สำเร็จ!`);
+                }).catch(() => showToast('แลกรางวัลไม่สำเร็จ', 'error'));
             };
 
             const updateOrderStatus = (order, status) => {
@@ -428,7 +424,7 @@
                                 handleNumpad={handleNumpad}
                                 handleSearchCustomer={handleSearchCustomer}
                                 selectedCustomer={selectedCustomer}
-                                setSelectedCustomer={setSelectedCustomer}
+                                setSelectedPhone={setSelectedPhone}
                                 handleAddPoints={handleAddPoints}
                                 setShowNewCustomerModal={setShowNewCustomerModal}
                                 setShowRedeemModal={setShowRedeemModal}
@@ -442,7 +438,7 @@
                                 customers={customers}
                                 formatPhone={formatPhone}
                                 onSelectCustomer={(c) => {
-                                    setSelectedCustomer(c);
+                                    setSelectedPhone(c.id);
                                     setPhoneInput(c.phone);
                                     setActiveTab('pos');
                                 }}
@@ -819,7 +815,7 @@
 
         function POSView({
             phoneInput, setPhoneInput, handleNumpad, handleSearchCustomer,
-            selectedCustomer, setSelectedCustomer, handleAddPoints,
+            selectedCustomer, setSelectedPhone, handleAddPoints,
             setShowNewCustomerModal, setShowRedeemModal, formatPhone, maxStampsPerCard
         }) {
             return (
@@ -911,7 +907,7 @@
 
                                     <div className="flex items-center space-x-2">
                                         <button
-                                            onClick={() => setSelectedCustomer(null)}
+                                            onClick={() => setSelectedPhone(null)}
                                             className="px-3 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-600 rounded-xl text-xs font-medium transition-all"
                                         >
                                             เปลี่ยนลูกค้า
@@ -966,7 +962,7 @@
 
                                     <div className="mt-4 pt-3 border-t border-stone-800 flex justify-between items-center text-[11px] text-stone-400">
                                         <span>สะสมครบ {maxStampsPerCard} แต้ม รับเครื่องดื่มฟรี!</span>
-                                        <span>ยอดรวมทั้งหมด: {selectedCustomer.totalEarned} แต้ม</span>
+                                        <span>สั่งไปแล้ว {selectedCustomer.totalDrinks || 0} แก้ว ({selectedCustomer.orderCount || 0} ครั้ง)</span>
                                     </div>
                                 </div>
 
@@ -999,6 +995,8 @@
                                     </div>
                                 </div>
 
+                                <CustomerOrderHistory phone={selectedCustomer.phone} />
+
                             </div>
                         ) : (
                             <div className="bg-white rounded-3xl p-12 shadow-xl border border-stone-100 flex flex-col items-center justify-center text-center h-full space-y-4">
@@ -1015,6 +1013,50 @@
                         )}
                     </div>
 
+                </div>
+            );
+        }
+
+        // Recent orders placed by this phone number, sourced straight from the orders
+        // collection (no separate copy kept on the customer record).
+        function CustomerOrderHistory({ phone }) {
+            const [orders, setOrders] = useState(null);
+
+            useEffect(() => {
+                setOrders(null);
+                const unsub = db.collection('orders').where('phone', '==', phone).limit(50)
+                    .onSnapshot((snap) => {
+                        const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                        list.sort((a, b) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0));
+                        setOrders(list.slice(0, 10));
+                    }, () => setOrders([]));
+                return unsub;
+            }, [phone]);
+
+            return (
+                <div className="space-y-2">
+                    <label className="block text-xs font-bold text-stone-500 uppercase tracking-wider">
+                        ประวัติการสั่งซื้อออนไลน์
+                    </label>
+                    {orders === null ? (
+                        <p className="text-xs text-stone-400">กำลังโหลด...</p>
+                    ) : orders.length === 0 ? (
+                        <p className="text-xs text-stone-400">ยังไม่เคยสั่งผ่านหน้าลูกค้า</p>
+                    ) : (
+                        <div className="space-y-2 max-h-56 overflow-y-auto">
+                            {orders.map(order => (
+                                <div key={order.id} className="bg-stone-50 rounded-xl p-3 flex justify-between items-center text-xs">
+                                    <div className="min-w-0 pr-2">
+                                        <p className="font-semibold text-stone-700">
+                                            {order.items.map(i => `${i.name} x${i.qty}`).join(', ')}
+                                        </p>
+                                        <p className="text-stone-400 mt-0.5">{ORDER_STATUS_LABEL[order.status] || order.status}</p>
+                                    </div>
+                                    <span className="font-bold text-amber-700 shrink-0">{order.total} บาท</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </div>
             );
         }
@@ -1069,7 +1111,7 @@
                                 </div>
 
                                 <div className="flex justify-between items-center text-xs text-stone-400 pt-3 border-t border-stone-50">
-                                    <span>สะสมแล้วทั้งหมด: {customer.totalEarned}</span>
+                                    <span>สั่งไปแล้ว: {customer.totalDrinks || 0} แก้ว ({customer.orderCount || 0} ครั้ง)</span>
                                     <span>ใช้งานล่าสุด: {customer.lastVisit ? customer.lastVisit.split(' ')[0] : '-'}</span>
                                 </div>
                             </div>
