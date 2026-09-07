@@ -37,7 +37,9 @@ service cloud.firestore {
     }
 
     // Membership records keyed by phone number (the document id). Written both by the customer
-    // ordering page (auto drink-count tracking) and the staff POS (manual stamps/registration).
+    // ordering page (auto drink-count tracking) and the staff POS (manual stamps/registration,
+    // and edit/delete from the back-office member list). No login system exists yet, so writes
+    // are open to anyone with the site link (same trust model as menu).
     match /customers/{phone} {
       allow read: if true;
       allow create, update: if request.resource.data.keys().hasAll(
@@ -48,7 +50,7 @@ service cloud.firestore {
         && request.resource.data.totalEarned is number
         && request.resource.data.totalDrinks is number
         && request.resource.data.orderCount is number;
-      allow delete: if false;
+      allow delete: if true;
     }
 
     // Append-only log of manual stamp/redeem actions from the staff POS.
