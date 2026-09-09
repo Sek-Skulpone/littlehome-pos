@@ -113,6 +113,30 @@
             { key: 'ready', label: 'พร้อมรับแล้ว', icon: 'check-check' },
         ];
 
+        // How a drink is served. The shop sets the options each menu item can be made in.
+        const SERVE_TYPES = [
+            { key: 'iced', label: 'เย็น' },
+            { key: 'blended', label: 'ปั่น' },
+        ];
+
+        function serveLabel(key) {
+            const type = SERVE_TYPES.find(t => t.key === key);
+            return type ? type.label : '';
+        }
+
+        function serveOptions(item) {
+            return SERVE_TYPES.map(t => t.key).filter(k => (item.serveTypes || []).includes(k));
+        }
+
+        // Cart keys carry the chosen option so เย็น and ปั่น of the same drink stay separate lines.
+        function cartKey(menuId, serve) {
+            return serve ? `${menuId}|${serve}` : menuId;
+        }
+
+        function itemLabel(item) {
+            return item.serveType ? `${item.name} (${serveLabel(item.serveType)})` : item.name;
+        }
+
         const playSound = (type) => {
             try {
                 const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -282,9 +306,10 @@
             const cartItems = useMemo(() => {
                 return Object.entries(cart)
                     .filter(([, qty]) => qty > 0)
-                    .map(([menuId, qty]) => {
+                    .map(([key, qty]) => {
+                        const [menuId, serveType] = key.split('|');
                         const item = menu.find(m => m.id === menuId);
-                        return item ? { menuId, name: item.name, price: item.price, qty } : null;
+                        return item ? { key, menuId, name: item.name, price: item.price, qty, serveType } : null;
                     })
                     .filter(Boolean);
             }, [cart, menu]);
@@ -292,12 +317,12 @@
             const cartCount = cartItems.reduce((sum, i) => sum + i.qty, 0);
             const cartTotal = cartItems.reduce((sum, i) => sum + i.qty * i.price, 0);
 
-            const changeQty = (menuId, delta) => {
+            const changeQty = (key, delta) => {
                 playSound('tap');
                 setCart(prev => {
                     const next = { ...prev };
-                    const current = next[menuId] || 0;
-                    next[menuId] = Math.max(0, current + delta);
+                    const current = next[key] || 0;
+                    next[key] = Math.max(0, current + delta);
                     return next;
                 });
             };
@@ -313,7 +338,9 @@
                     const orderNumber = await getNextOrderNumber();
                     const docRef = await db.collection('orders').add({
                         orderNumber,
-                        items: cartItems.map(({ menuId, name, price, qty }) => ({ menuId, name, price, qty })),
+                        items: cartItems.map(({ menuId, name, price, qty, serveType }) => (
+                            serveType ? { menuId, name, price, qty, serveType } : { menuId, name, price, qty }
+                        )),
                         total: cartTotal,
                         orderType,
                         tableNumber: orderType === 'dine-in' ? tableNumber.trim() : '',
@@ -381,7 +408,7 @@
                         </div>
                     )}
 
-                    <header className="sticky top-0 z-30 bg-coffee-100 text-coffee-900 px-5 py-4 flex items-center space-x-3 border-b border-coffee-200">
+                    <header className="sticky top-0 z-30 bg-coffee-200 text-coffee-900 px-5 py-4 flex items-center space-x-3 border-b border-coffee-300">
                         <img src="logo.png" alt="Little Homie" className="w-12 h-12 rounded-full shrink-0" />
                         <div>
                             <h1 className="font-bold text-base leading-tight text-coffee-950">Little Homie Coffee</h1>
@@ -422,7 +449,7 @@
                         <div className="fixed bottom-0 left-0 right-0 max-w-lg mx-auto p-4 z-30">
                             <button
                                 onClick={() => { playSound('tap'); setView('checkout'); }}
-                                className="w-full bg-amber-600 hover:bg-amber-700 text-white rounded-2xl py-4 px-5 shadow-sm flex items-center justify-between active:scale-95 transition-all slide-up"
+                                className="w-full bg-amber-300 hover:bg-amber-400 text-amber-950 rounded-2xl py-4 px-5 shadow-sm flex items-center justify-between active:scale-95 transition-all slide-up"
                             >
                                 <span className="flex items-center space-x-2 font-bold">
                                     <span className="bg-white/20 rounded-full w-7 h-7 flex items-center justify-center text-sm">{cartCount}</span>
@@ -467,34 +494,62 @@
                             </div>
                             <div className="space-y-2">
                                 {grouped[cat].map(item => {
-                                    const qty = cart[item.id] || 0;
+                                    const options = serveOptions(item);
+                                    const choose = options.length > 1;
+                                    const singleKey = cartKey(item.id, options[0]);
+                                    const qty = cart[singleKey] || 0;
+                                    const stepper = (key, value) => (
+                                        <div className="shrink-0 flex items-center space-x-2 bg-amber-50 rounded-xl px-1.5 py-1.5">
+                                            <button onClick={() => changeQty(key, -1)} className="w-7 h-7 rounded-lg bg-white text-amber-700 flex items-center justify-center shadow-sm active:scale-90 transition-all">
+                                                <Icon name="minus" className="w-4 h-4"></Icon>
+                                            </button>
+                                            <span className="w-5 text-center font-bold text-amber-800 text-sm">{value}</span>
+                                            <button onClick={() => changeQty(key, 1)} className="w-7 h-7 rounded-lg bg-white text-amber-700 flex items-center justify-center shadow-sm active:scale-90 transition-all">
+                                                <Icon name="plus" className="w-4 h-4"></Icon>
+                                            </button>
+                                        </div>
+                                    );
                                     return (
-                                        <div key={item.id} className={`bg-white rounded-2xl p-3.5 shadow-sm border flex items-center justify-between ${
+                                        <div key={item.id} className={`bg-white rounded-2xl p-3.5 shadow-sm border ${
                                             item.available === false ? 'opacity-50 border-stone-100' : 'border-stone-100'
                                         }`}>
-                                            <div className="min-w-0 pr-3">
-                                                <p className="font-semibold text-stone-800 text-sm truncate">{item.name}</p>
-                                                <p className="text-xs text-amber-700 font-medium mt-0.5">{item.price} บาท</p>
-                                                {item.available === false && <p className="text-[11px] text-red-500 mt-0.5">หมดชั่วคราว</p>}
+                                            <div className="flex items-center justify-between">
+                                                <div className="min-w-0 pr-3">
+                                                    <p className="font-semibold text-stone-800 text-sm truncate">{item.name}</p>
+                                                    <p className="text-xs text-amber-700 font-medium mt-0.5">{item.price} บาท</p>
+                                                    {item.available === false && <p className="text-[11px] text-red-500 mt-0.5">หมดชั่วคราว</p>}
+                                                </div>
+                                                {item.available === false ? (
+                                                    <span className="text-xs text-stone-400 shrink-0">หมด</span>
+                                                ) : choose ? null : qty === 0 ? (
+                                                    <button
+                                                        onClick={() => changeQty(singleKey, 1)}
+                                                        className="shrink-0 w-10 h-10 rounded-xl bg-amber-300 hover:bg-amber-400 text-amber-950 flex items-center justify-center active:scale-90 transition-all"
+                                                    >
+                                                        <Icon name="plus" className="w-5 h-5"></Icon>
+                                                    </button>
+                                                ) : stepper(singleKey, qty)}
                                             </div>
-                                            {item.available === false ? (
-                                                <span className="text-xs text-stone-400 shrink-0">หมด</span>
-                                            ) : qty === 0 ? (
-                                                <button
-                                                    onClick={() => changeQty(item.id, 1)}
-                                                    className="shrink-0 w-10 h-10 rounded-xl bg-amber-600 hover:bg-amber-700 text-white flex items-center justify-center active:scale-90 transition-all"
-                                                >
-                                                    <Icon name="plus" className="w-5 h-5"></Icon>
-                                                </button>
-                                            ) : (
-                                                <div className="shrink-0 flex items-center space-x-2 bg-amber-50 rounded-xl px-1.5 py-1.5">
-                                                    <button onClick={() => changeQty(item.id, -1)} className="w-7 h-7 rounded-lg bg-white text-amber-700 flex items-center justify-center shadow-sm active:scale-90 transition-all">
-                                                        <Icon name="minus" className="w-4 h-4"></Icon>
-                                                    </button>
-                                                    <span className="w-5 text-center font-bold text-amber-800 text-sm">{qty}</span>
-                                                    <button onClick={() => changeQty(item.id, 1)} className="w-7 h-7 rounded-lg bg-white text-amber-700 flex items-center justify-center shadow-sm active:scale-90 transition-all">
-                                                        <Icon name="plus" className="w-4 h-4"></Icon>
-                                                    </button>
+
+                                            {item.available !== false && choose && (
+                                                <div className="mt-2.5 grid grid-cols-2 gap-2">
+                                                    {options.map(t => {
+                                                        const key = cartKey(item.id, t);
+                                                        const optQty = cart[key] || 0;
+                                                        return (
+                                                            <div key={t} className="flex items-center justify-between bg-stone-50 rounded-xl pl-3 pr-1.5 py-1.5">
+                                                                <span className="text-xs font-medium text-stone-600">{serveLabel(t)}</span>
+                                                                {optQty === 0 ? (
+                                                                    <button
+                                                                        onClick={() => changeQty(key, 1)}
+                                                                        className="w-8 h-8 rounded-lg bg-amber-300 hover:bg-amber-400 text-amber-950 flex items-center justify-center active:scale-90 transition-all"
+                                                                    >
+                                                                        <Icon name="plus" className="w-4 h-4"></Icon>
+                                                                    </button>
+                                                                ) : stepper(key, optQty)}
+                                                            </div>
+                                                        );
+                                                    })}
                                                 </div>
                                             )}
                                         </div>
@@ -524,17 +579,17 @@
                     <div className="bg-white rounded-3xl p-4 shadow-sm border border-stone-100 space-y-3">
                         <h2 className="font-bold text-stone-800 text-sm">รายการที่สั่ง</h2>
                         {cartItems.map(item => (
-                            <div key={item.menuId} className="flex items-center justify-between">
+                            <div key={item.key} className="flex items-center justify-between">
                                 <div className="min-w-0 pr-3">
-                                    <p className="text-sm font-medium text-stone-700 truncate">{item.name}</p>
+                                    <p className="text-sm font-medium text-stone-700 truncate">{itemLabel(item)}</p>
                                     <p className="text-xs text-stone-400">{item.price} x {item.qty}</p>
                                 </div>
                                 <div className="shrink-0 flex items-center space-x-2 bg-stone-50 rounded-xl px-1.5 py-1.5">
-                                    <button onClick={() => changeQty(item.menuId, -1)} className="w-7 h-7 rounded-lg bg-white text-stone-600 flex items-center justify-center shadow-sm active:scale-90">
+                                    <button onClick={() => changeQty(item.key, -1)} className="w-7 h-7 rounded-lg bg-white text-stone-600 flex items-center justify-center shadow-sm active:scale-90">
                                         <Icon name="minus" className="w-4 h-4"></Icon>
                                     </button>
                                     <span className="w-5 text-center font-bold text-stone-700 text-sm">{item.qty}</span>
-                                    <button onClick={() => changeQty(item.menuId, 1)} className="w-7 h-7 rounded-lg bg-white text-stone-600 flex items-center justify-center shadow-sm active:scale-90">
+                                    <button onClick={() => changeQty(item.key, 1)} className="w-7 h-7 rounded-lg bg-white text-stone-600 flex items-center justify-center shadow-sm active:scale-90">
                                         <Icon name="plus" className="w-4 h-4"></Icon>
                                     </button>
                                 </div>
@@ -552,11 +607,11 @@
                             <div className="grid grid-cols-2 gap-2">
                                 <button
                                     onClick={() => setOrderType('dine-in')}
-                                    className={`py-2.5 rounded-xl text-sm font-medium transition-all ${orderType === 'dine-in' ? 'bg-amber-600 text-white shadow-sm' : 'bg-stone-100 text-stone-500'}`}
+                                    className={`py-2.5 rounded-xl text-sm font-medium transition-all ${orderType === 'dine-in' ? 'bg-amber-300 text-amber-950 shadow-sm' : 'bg-stone-100 text-stone-500'}`}
                                 >ทานที่ร้าน</button>
                                 <button
                                     onClick={() => setOrderType('takeaway')}
-                                    className={`py-2.5 rounded-xl text-sm font-medium transition-all ${orderType === 'takeaway' ? 'bg-amber-600 text-white shadow-sm' : 'bg-stone-100 text-stone-500'}`}
+                                    className={`py-2.5 rounded-xl text-sm font-medium transition-all ${orderType === 'takeaway' ? 'bg-amber-300 text-amber-950 shadow-sm' : 'bg-stone-100 text-stone-500'}`}
                                 >กลับบ้าน</button>
                             </div>
                         </div>
@@ -600,7 +655,7 @@
                         onClick={onSubmit}
                         disabled={!canSubmit || submitting}
                         className={`w-full py-4 rounded-2xl font-bold text-base shadow-sm transition-all flex items-center justify-center space-x-2 ${
-                            canSubmit && !submitting ? 'bg-amber-600 hover:bg-amber-700 text-white active:scale-95' : 'bg-stone-200 text-stone-400'
+                            canSubmit && !submitting ? 'bg-amber-300 hover:bg-amber-400 text-amber-950 active:scale-95' : 'bg-stone-200 text-stone-400'
                         }`}
                     >
                         {submitting ? (
@@ -645,7 +700,7 @@
                                         <React.Fragment key={step.key}>
                                             <div className="flex flex-col items-center space-y-1.5 flex-1">
                                                 <div className={`w-10 h-10 rounded-2xl flex items-center justify-center transition-all ${
-                                                    active ? 'bg-amber-600 text-white' : 'bg-stone-100 text-stone-400'
+                                                    active ? 'bg-amber-300 text-amber-950' : 'bg-stone-100 text-stone-400'
                                                 }`}>
                                                     <Icon name={active && idx < stepIndex ? 'check' : step.icon} className={`w-5 h-5 ${step.icon === 'loader' && idx === stepIndex ? 'animate-spin' : ''}`}></Icon>
                                                 </div>
@@ -663,8 +718,8 @@
 
                     <div className="bg-white rounded-3xl p-5 shadow-sm border border-stone-100 space-y-2">
                         {order.items.map(item => (
-                            <div key={item.menuId} className="flex justify-between text-sm">
-                                <span className="text-stone-600">{item.name} x{item.qty}</span>
+                            <div key={item.key} className="flex justify-between text-sm">
+                                <span className="text-stone-600">{itemLabel(item)} x{item.qty}</span>
                                 <span className="text-stone-700 font-medium">{item.price * item.qty} บาท</span>
                             </div>
                         ))}
@@ -676,7 +731,7 @@
 
                     <button
                         onClick={onNewOrder}
-                        className="w-full py-3.5 bg-sky-500 hover:bg-sky-600 text-white rounded-2xl font-medium transition-all active:scale-95"
+                        className="w-full py-3.5 bg-sky-300 hover:bg-sky-400 text-sky-950 rounded-2xl font-medium transition-all active:scale-95"
                     >
                         สั่งเพิ่ม / สั่งใหม่
                     </button>
