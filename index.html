@@ -20,18 +20,25 @@
                     fontFamily: {
                         sans: ['Kanit', 'sans-serif'],
                     },
+                    // Minimal pastel theme. Each swatch colour sits at the 300 step of its scale
+                    // (#F2E8CB cream, #EDBFBF blush, #B4D9E2 powder blue) and the rest are tints
+                    // and shades of it, so overriding Tailwind's stock amber/sky rethemes every
+                    // existing amber-*/sky-* class at once without renaming anything.
                     colors: {
                         coffee: {
-                            50: '#fdf8f6', 100: '#f2e8e5', 200: '#e8d5ce', 300: '#d3b2a7',
-                            400: '#b78776', 500: '#9c6252', 600: '#874f41', 700: '#703e33',
-                            800: '#5c342b', 900: '#4c2d26', 950: '#281512',
+                            50: '#fdfbf5', 100: '#faf5e7', 200: '#f2e8cb', 300: '#e7d7ab',
+                            400: '#d8c186', 500: '#c5a866', 600: '#ab8c4f', 700: '#8b7040',
+                            800: '#6f5a36', 900: '#5a4a2f', 950: '#332a1a',
                         },
-                        // Warm caramel-gold pulled from the shop logo, replacing Tailwind's
-                        // stock (more orange) amber so every existing amber-* class rethemes at once.
                         amber: {
-                            50: '#faf3e7', 100: '#f3e2c4', 200: '#e8c88e', 300: '#dcac5c',
-                            400: '#ce9640', 500: '#bd8232', 600: '#a66b26', 700: '#8a5620',
-                            800: '#6e441c', 900: '#563617', 950: '#331f0d',
+                            50: '#fdf7f7', 100: '#faeded', 200: '#f5dcdc', 300: '#edbfbf',
+                            400: '#dfa2a2', 500: '#cd8484', 600: '#b76a6a', 700: '#985555',
+                            800: '#7b4646', 900: '#653b3b', 950: '#372020',
+                        },
+                        sky: {
+                            50: '#f5fafc', 100: '#e9f4f7', 200: '#d5eaf0', 300: '#b4d9e2',
+                            400: '#8dc2d0', 500: '#66a7b9', 600: '#4c8b9d', 700: '#3e7080',
+                            800: '#365b68', 900: '#2f4c57', 950: '#1d3038',
                         },
                     }
                 }
@@ -42,7 +49,7 @@
         body {
             font-family: 'Kanit', sans-serif;
             -webkit-tap-highlight-color: transparent;
-            background-color: #f7f3f0;
+            background-color: #fdfbf5;
         }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.03); }
@@ -59,7 +66,7 @@
         }
     </style>
 </head>
-<body class="bg-stone-100 text-stone-800 antialiased min-h-screen">
+<body class="bg-coffee-50 text-stone-700 antialiased min-h-screen">
     <div id="root"></div>
 
     <script>
@@ -188,7 +195,9 @@
                     orderCount: (data.orderCount || 0) + 1,
                     lastVisit: visitTime,
                 };
-                if (name && name !== data.name) updated.name = name;
+                // Only fill a blank name. Whatever the shop has on the member card was curated
+                // from the back office, and a nickname typed at checkout should not overwrite it.
+                if (name && !data.name) updated.name = name;
                 t.update(ref, updated);
                 return { ...data, ...updated };
             });
@@ -199,13 +208,25 @@
         // under React) or an imperative ref+effect mutation (which can still race a fast-arriving
         // re-render before the effect runs). Setting the HTML synchronously in the same render
         // keeps the DOM fully inside React's own bookkeeping, so there's nothing left to race.
+        // The markup for a given icon never changes, so build it once instead of creating and
+        // serialising a DOM node on every render of every menu row.
+        const iconMarkup = {};
         function toPascalCase(str) {
             return str.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join('');
         }
+        function svgFor(name) {
+            // Never cache a miss caused by the library not being ready, or the icon would stay
+            // blank for good once lucide finishes loading.
+            if (!window.lucide) return null;
+            if (!(name in iconMarkup)) {
+                const iconData = window.lucide.icons[toPascalCase(name)];
+                iconMarkup[name] = iconData ? window.lucide.createElement(iconData).outerHTML : null;
+            }
+            return iconMarkup[name];
+        }
         function Icon({ name, className = '' }) {
-            const iconData = window.lucide && window.lucide.icons[toPascalCase(name)];
-            if (!iconData) return <span className={`inline-flex ${className}`}></span>;
-            const svg = window.lucide.createElement(iconData).outerHTML;
+            const svg = svgFor(name);
+            if (!svg) return <span className={`inline-flex ${className}`}></span>;
             return <span className={`inline-flex ${className}`} dangerouslySetInnerHTML={{ __html: svg }}></span>;
         }
 
@@ -350,9 +371,9 @@
             };
 
             return (
-                <div className="min-h-screen flex flex-col max-w-lg mx-auto bg-stone-100 relative">
+                <div className="min-h-screen flex flex-col max-w-lg mx-auto bg-coffee-50 relative">
                     {notification && (
-                        <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl shadow-xl font-medium text-white flex items-center space-x-2 ${
+                        <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl shadow-sm font-medium text-white flex items-center space-x-2 ${
                             notification.type === 'error' ? 'bg-red-500' : 'bg-emerald-600'
                         }`}>
                             <Icon name={notification.type === 'error' ? 'alert-circle' : 'check-circle'} className="w-5 h-5"></Icon>
@@ -360,11 +381,11 @@
                         </div>
                     )}
 
-                    <header className="sticky top-0 z-30 bg-coffee-950 text-white px-5 py-4 flex items-center space-x-3 shadow-md">
-                        <img src="logo.png" alt="Little Homie" className="w-12 h-12 rounded-full shadow-md shrink-0" />
+                    <header className="sticky top-0 z-30 bg-coffee-100 text-coffee-900 px-5 py-4 flex items-center space-x-3 border-b border-coffee-200">
+                        <img src="logo.png" alt="Little Homie" className="w-12 h-12 rounded-full shrink-0" />
                         <div>
-                            <h1 className="font-bold text-base leading-tight">Little Homie Coffee</h1>
-                            <p className="text-[11px] text-stone-400">สั่งเครื่องดื่ม &amp; ของทานเล่น</p>
+                            <h1 className="font-bold text-base leading-tight text-coffee-950">Little Homie Coffee</h1>
+                            <p className="text-[11px] text-coffee-600">สั่งเครื่องดื่ม &amp; ของทานเล่น</p>
                         </div>
                     </header>
 
@@ -401,7 +422,7 @@
                         <div className="fixed bottom-0 left-0 right-0 max-w-lg mx-auto p-4 z-30">
                             <button
                                 onClick={() => { playSound('tap'); setView('checkout'); }}
-                                className="w-full bg-amber-600 hover:bg-amber-700 text-white rounded-2xl py-4 px-5 shadow-2xl shadow-amber-900/30 flex items-center justify-between active:scale-95 transition-all slide-up"
+                                className="w-full bg-amber-600 hover:bg-amber-700 text-white rounded-2xl py-4 px-5 shadow-sm flex items-center justify-between active:scale-95 transition-all slide-up"
                             >
                                 <span className="flex items-center space-x-2 font-bold">
                                     <span className="bg-white/20 rounded-full w-7 h-7 flex items-center justify-center text-sm">{cartCount}</span>
@@ -531,11 +552,11 @@
                             <div className="grid grid-cols-2 gap-2">
                                 <button
                                     onClick={() => setOrderType('dine-in')}
-                                    className={`py-2.5 rounded-xl text-sm font-medium transition-all ${orderType === 'dine-in' ? 'bg-amber-600 text-white shadow-md' : 'bg-stone-100 text-stone-500'}`}
+                                    className={`py-2.5 rounded-xl text-sm font-medium transition-all ${orderType === 'dine-in' ? 'bg-amber-600 text-white shadow-sm' : 'bg-stone-100 text-stone-500'}`}
                                 >ทานที่ร้าน</button>
                                 <button
                                     onClick={() => setOrderType('takeaway')}
-                                    className={`py-2.5 rounded-xl text-sm font-medium transition-all ${orderType === 'takeaway' ? 'bg-amber-600 text-white shadow-md' : 'bg-stone-100 text-stone-500'}`}
+                                    className={`py-2.5 rounded-xl text-sm font-medium transition-all ${orderType === 'takeaway' ? 'bg-amber-600 text-white shadow-sm' : 'bg-stone-100 text-stone-500'}`}
                                 >กลับบ้าน</button>
                             </div>
                         </div>
@@ -578,7 +599,7 @@
                     <button
                         onClick={onSubmit}
                         disabled={!canSubmit || submitting}
-                        className={`w-full py-4 rounded-2xl font-bold text-base shadow-lg transition-all flex items-center justify-center space-x-2 ${
+                        className={`w-full py-4 rounded-2xl font-bold text-base shadow-sm transition-all flex items-center justify-center space-x-2 ${
                             canSubmit && !submitting ? 'bg-amber-600 hover:bg-amber-700 text-white active:scale-95' : 'bg-stone-200 text-stone-400'
                         }`}
                     >
@@ -655,7 +676,7 @@
 
                     <button
                         onClick={onNewOrder}
-                        className="w-full py-3.5 bg-coffee-900 hover:bg-coffee-950 text-white rounded-2xl font-medium transition-all active:scale-95"
+                        className="w-full py-3.5 bg-sky-500 hover:bg-sky-600 text-white rounded-2xl font-medium transition-all active:scale-95"
                     >
                         สั่งเพิ่ม / สั่งใหม่
                     </button>

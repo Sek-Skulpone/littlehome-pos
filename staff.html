@@ -20,18 +20,25 @@
                     fontFamily: {
                         sans: ['Kanit', 'sans-serif'],
                     },
+                    // Minimal pastel theme. Each swatch colour sits at the 300 step of its scale
+                    // (#F2E8CB cream, #EDBFBF blush, #B4D9E2 powder blue) and the rest are tints
+                    // and shades of it, so overriding Tailwind's stock amber/sky rethemes every
+                    // existing amber-*/sky-* class at once without renaming anything.
                     colors: {
                         coffee: {
-                            50: '#fdf8f6', 100: '#f2e8e5', 200: '#e8d5ce', 300: '#d3b2a7',
-                            400: '#b78776', 500: '#9c6252', 600: '#874f41', 700: '#703e33',
-                            800: '#5c342b', 900: '#4c2d26', 950: '#281512',
+                            50: '#fdfbf5', 100: '#faf5e7', 200: '#f2e8cb', 300: '#e7d7ab',
+                            400: '#d8c186', 500: '#c5a866', 600: '#ab8c4f', 700: '#8b7040',
+                            800: '#6f5a36', 900: '#5a4a2f', 950: '#332a1a',
                         },
-                        // Warm caramel-gold pulled from the shop logo, replacing Tailwind's
-                        // stock (more orange) amber so every existing amber-* class rethemes at once.
                         amber: {
-                            50: '#faf3e7', 100: '#f3e2c4', 200: '#e8c88e', 300: '#dcac5c',
-                            400: '#ce9640', 500: '#bd8232', 600: '#a66b26', 700: '#8a5620',
-                            800: '#6e441c', 900: '#563617', 950: '#331f0d',
+                            50: '#fdf7f7', 100: '#faeded', 200: '#f5dcdc', 300: '#edbfbf',
+                            400: '#dfa2a2', 500: '#cd8484', 600: '#b76a6a', 700: '#985555',
+                            800: '#7b4646', 900: '#653b3b', 950: '#372020',
+                            },
+                            sky: {
+                            50: '#f5fafc', 100: '#e9f4f7', 200: '#d5eaf0', 300: '#b4d9e2',
+                            400: '#8dc2d0', 500: '#66a7b9', 600: '#4c8b9d', 700: '#3e7080',
+                            800: '#365b68', 900: '#2f4c57', 950: '#1d3038',
                         },
                     }
                 }
@@ -44,7 +51,7 @@
             -webkit-tap-highlight-color: transparent;
             user-select: none;
             -webkit-user-select: none;
-            background-color: #f7f3f0;
+            background-color: #fdfbf5;
         }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.03); }
@@ -61,7 +68,7 @@
         }
     </style>
 </head>
-<body class="bg-stone-100 text-stone-800 antialiased min-h-screen">
+<body class="bg-coffee-50 text-stone-700 antialiased min-h-screen">
     <div id="root"></div>
 
     <script>
@@ -123,14 +130,93 @@
             }
         };
 
-        const INITIAL_CUSTOMERS = [
-            { phone: '0819876543', name: 'คุณสมชาย ใจดี', points: 8, totalEarned: 18, totalDrinks: 18, orderCount: 9, lastVisit: '2026-09-05 14:20' },
-            { phone: '0891234567', name: 'คุณพลอย สุขสรรค์', points: 10, totalEarned: 30, totalDrinks: 30, orderCount: 14, lastVisit: '2026-09-06 10:15' },
-            { phone: '0923456789', name: 'คุณกิตติพงษ์', points: 3, totalEarned: 3, totalDrinks: 3, orderCount: 2, lastVisit: '2026-09-04 08:30' },
-        ];
+        // A walk-in sale can register a member from a phone number alone, so the name may be blank.
+        function memberLabel(customer) {
+            return customer.name || 'ไม่ระบุชื่อ';
+        }
 
         function timeString(date) {
             return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+        }
+
+        function dateKey(date) {
+            return timeString(date).split(' ')[0];
+        }
+
+        // Same daily counter the customer ordering page claims from, so walk-in and online
+        // orders share one run of short order numbers per day.
+        async function getNextOrderNumber() {
+            const today = new Date();
+            const dayKey = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
+            const ref = db.collection('counters').doc(dayKey);
+            return db.runTransaction(async (t) => {
+                const snap = await t.get(ref);
+                const value = (snap.exists ? snap.data().count : 0) + 1;
+                t.set(ref, { count: value });
+                return value;
+            });
+        }
+
+        // Credits a walk-in sale to the member's card (one point per item), registering the
+        // phone as a new member if it hasn't been seen before.
+        async function earnPointsForOrder(phone, name, itemCount, orderNumber) {
+            const ref = db.collection('customers').doc(phone);
+            const visitTime = timeString(new Date());
+            await db.runTransaction(async (t) => {
+                const snap = await t.get(ref);
+                if (!snap.exists) {
+                    t.set(ref, {
+                        phone, name: name || '', points: itemCount, totalEarned: itemCount,
+                        totalDrinks: itemCount, orderCount: 1, lastVisit: visitTime,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    });
+                    return;
+                }
+                const data = snap.data();
+                const updated = {
+                    points: (data.points || 0) + itemCount,
+                    totalEarned: (data.totalEarned || 0) + itemCount,
+                    totalDrinks: (data.totalDrinks || 0) + itemCount,
+                    orderCount: (data.orderCount || 0) + 1,
+                    lastVisit: visitTime,
+                };
+                if (name && !data.name) updated.name = name;
+                t.update(ref, updated);
+            });
+            await db.collection('loyaltyEvents').add({
+                customerName: name || '', phone, type: 'ADD', amount: itemCount,
+                note: `ขายหน้าร้าน #${orderNumber} (+${itemCount})`, time: visitTime,
+                createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+            });
+        }
+
+        // Undoes everything a cancelled order gave the member: the points it granted (walk-in
+        // sales only) and the visit counters, which the customer ordering page raises for every
+        // order whether or not points were involved.
+        async function reversePointsForOrder(order) {
+            if (!order.phone) return;
+            const points = order.pointsAwarded || 0;
+            const itemCount = order.itemCount || (order.items || []).reduce((sum, i) => sum + (i.qty || 0), 0);
+            const ref = db.collection('customers').doc(order.phone);
+            const visitTime = timeString(new Date());
+            await db.runTransaction(async (t) => {
+                const snap = await t.get(ref);
+                if (!snap.exists) return;
+                const data = snap.data();
+                t.update(ref, {
+                    points: Math.max(0, (data.points || 0) - points),
+                    totalEarned: Math.max(0, (data.totalEarned || 0) - points),
+                    totalDrinks: Math.max(0, (data.totalDrinks || 0) - itemCount),
+                    orderCount: Math.max(0, (data.orderCount || 0) - 1),
+                });
+            });
+            if (points > 0) {
+                await db.collection('loyaltyEvents').add({
+                    customerName: order.customerName || '', phone: order.phone, type: 'REDEEM', amount: points,
+                    note: `ยกเลิกออเดอร์ #${order.orderNumber} (-${points})`, time: visitTime,
+                    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                });
+            }
         }
 
         const INITIAL_REWARDS = [
@@ -163,18 +249,32 @@
         // under React) or an imperative ref+effect mutation (which can still race a fast-arriving
         // re-render before the effect runs). Setting the HTML synchronously in the same render
         // keeps the DOM fully inside React's own bookkeeping, so there's nothing left to race.
+        // The markup for a given icon never changes, so build it once instead of creating and
+        // serialising a DOM node on every render — the menu grid and stamp card alone redraw
+        // dozens of icons on each keystroke.
+        const iconMarkup = {};
         function toPascalCase(str) {
             return str.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join('');
         }
+        function svgFor(name) {
+            // Never cache a miss caused by the library not being ready, or the icon would stay
+            // blank for good once lucide finishes loading.
+            if (!window.lucide) return null;
+            if (!(name in iconMarkup)) {
+                const iconData = window.lucide.icons[toPascalCase(name)];
+                iconMarkup[name] = iconData ? window.lucide.createElement(iconData).outerHTML : null;
+            }
+            return iconMarkup[name];
+        }
         function Icon({ name, className = '' }) {
-            const iconData = window.lucide && window.lucide.icons[toPascalCase(name)];
-            if (!iconData) return <span className={`inline-flex ${className}`}></span>;
-            const svg = window.lucide.createElement(iconData).outerHTML;
+            const svg = svgFor(name);
+            if (!svg) return <span className={`inline-flex ${className}`}></span>;
             return <span className={`inline-flex ${className}`} dangerouslySetInnerHTML={{ __html: svg }}></span>;
         }
 
         function App() {
-            const [activeTab, setActiveTab] = useState('orders'); // 'orders', 'pos', 'customers', 'history', 'menu', 'settings'
+            const [activeTab, setActiveTab] = useState('orders'); // 'orders', 'sale', 'pos', 'customers', 'history', 'reports', 'menu', 'settings'
+            const [cancellingOrder, setCancellingOrder] = useState(null);
             const [customers, setCustomers] = useState([]);
             const [rewards, setRewards] = useState(() => {
                 const saved = localStorage.getItem('coffee_rewards');
@@ -193,6 +293,7 @@
 
             const [orders, setOrders] = useState([]);
             const [menuItems, setMenuItems] = useState([]);
+            const [cashbook, setCashbook] = useState([]);
             const seenOrderIds = useRef(null);
 
             useEffect(() => {
@@ -201,16 +302,10 @@
 
             // Membership records, keyed by phone (the doc id); shared with the customer ordering
             // page so a walk-in stamp and an online order both land on the same member record.
+            // Nothing is seeded here: an empty list means the shop genuinely has no members yet,
+            // and writing sample people into a live shop's database would be worse than blank.
             useEffect(() => {
-                let seeded = false;
                 const unsub = db.collection('customers').onSnapshot((snap) => {
-                    if (snap.empty && !seeded) {
-                        seeded = true;
-                        const batch = db.batch();
-                        INITIAL_CUSTOMERS.forEach((c) => batch.set(db.collection('customers').doc(c.phone), c));
-                        batch.commit().catch(() => {});
-                        return;
-                    }
                     setCustomers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
                 });
                 return unsub;
@@ -218,27 +313,18 @@
 
             // Log of manual stamp/redeem actions from this POS (append-only).
             useEffect(() => {
-                let seeded = false;
                 const unsub = db.collection('loyaltyEvents').orderBy('createdAt', 'desc').limit(100)
                     .onSnapshot((snap) => {
-                        if (snap.empty && !seeded) {
-                            seeded = true;
-                            const batch = db.batch();
-                            [
-                                { time: '2026-09-06 10:15', customerName: 'คุณพลอย สุขสรรค์', phone: '0891234567', type: 'ADD', amount: 1, note: 'สะสมแต้ม (+1)' },
-                                { time: '2026-09-05 14:20', customerName: 'คุณสมชาย ใจดี', phone: '0819876543', type: 'ADD', amount: 2, note: 'สะสมแต้ม (+2)' },
-                            ].forEach((e) => batch.set(db.collection('loyaltyEvents').doc(), { ...e, createdAt: firebase.firestore.FieldValue.serverTimestamp() }));
-                            batch.commit().catch(() => {});
-                            return;
-                        }
                         setHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
                     });
                 return unsub;
             }, []);
 
             // Live orders feed; pings a sound when a genuinely new order arrives (not on first load).
+            // The window has to cover the daily report too, which totals sales from this same list,
+            // so it is wider than the order board alone would need.
             useEffect(() => {
-                const unsub = db.collection('orders').orderBy('createdAt', 'desc').limit(100)
+                const unsub = db.collection('orders').orderBy('createdAt', 'desc').limit(500)
                     .onSnapshot((snap) => {
                         const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
                         if (seenOrderIds.current === null) {
@@ -256,6 +342,15 @@
             useEffect(() => {
                 const unsub = db.collection('menu').orderBy('sortOrder').onSnapshot((snap) => {
                     setMenuItems(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+                });
+                return unsub;
+            }, []);
+
+            // Manual daily income/expense entries for the shop's cashbook report.
+            useEffect(() => {
+                const unsub = db.collection('cashbook').orderBy('createdAt', 'desc').limit(500)
+                    .onSnapshot((snap) => {
+                        setCashbook(snap.docs.map(d => ({ id: d.id, ...d.data() })));
                 });
                 return unsub;
             }, []);
@@ -380,11 +475,27 @@
                 }).catch(() => showToast('อัปเดตออเดอร์ไม่สำเร็จ', 'error'));
             };
 
+            // Cancelling voids the sale everywhere at once: the order drops out of the day's
+            // revenue (the report counts only non-cancelled orders) and any points it granted
+            // are taken back off the member's card.
+            const confirmCancelOrder = () => {
+                const order = cancellingOrder;
+                setCancellingOrder(null);
+                // Guard against a second cancel (e.g. from another terminal) taking the points twice.
+                if (order.status === 'cancelled') return;
+                db.collection('orders').doc(order.id).update({
+                    status: 'cancelled',
+                    updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+                }).then(() => reversePointsForOrder(order))
+                    .then(() => showToast(`ยกเลิกออเดอร์ #${order.orderNumber} แล้ว`))
+                    .catch(() => showToast('ยกเลิกออเดอร์ไม่สำเร็จ', 'error'));
+            };
+
             return (
-                <div className="flex flex-col md:flex-row h-screen max-h-screen overflow-hidden bg-stone-100">
+                <div className="flex flex-col md:flex-row h-screen max-h-screen overflow-hidden bg-coffee-50">
 
                     {notification && (
-                        <div className={`fixed top-4 right-4 z-50 px-5 py-3 rounded-2xl shadow-xl font-medium text-white transition-all transform duration-300 flex items-center space-x-2 ${
+                        <div className={`fixed top-4 right-4 z-50 px-5 py-3 rounded-2xl shadow-sm font-medium text-white transition-all transform duration-300 flex items-center space-x-2 ${
                             notification.type === 'error' ? 'bg-red-500' : 'bg-emerald-600'
                         }`}>
                             <Icon name={notification.type === 'error' ? 'alert-circle' : 'check-circle'} className="w-5 h-5"></Icon>
@@ -392,33 +503,44 @@
                         </div>
                     )}
 
-                    <aside className="w-full md:w-64 bg-coffee-950 text-stone-200 flex flex-row md:flex-col justify-between p-3 md:p-5 shadow-2xl z-20 shrink-0 overflow-x-auto">
+                    <aside className="w-full md:w-64 bg-coffee-100 text-coffee-800 flex flex-row md:flex-col justify-between p-3 md:p-5 border-b md:border-b-0 md:border-r border-coffee-200 z-20 shrink-0 overflow-x-auto">
                         <div className="flex items-center space-x-3 md:mb-8 shrink-0">
-                            <img src="logo.png" alt="Little Homie" className="w-10 h-10 rounded-full shadow-lg shrink-0" />
+                            <img src="logo.png" alt="Little Homie" className="w-10 h-10 rounded-full shrink-0" />
                             <div>
-                                <h1 className="font-bold text-base leading-tight text-white">Little Homie POS</h1>
-                                <p className="text-[11px] text-stone-400">ระบบหลังร้านลิทเทิลโฮมมี่</p>
+                                <h1 className="font-bold text-base leading-tight text-coffee-950">Little Homie POS</h1>
+                                <p className="text-[11px] text-coffee-600">ระบบหลังร้านลิทเทิลโฮมมี่</p>
                             </div>
                         </div>
 
                         <nav className="flex flex-row md:flex-col space-x-1 md:space-x-0 md:space-y-2">
                             <NavButton active={activeTab === 'orders'} onClick={() => setActiveTab('orders')} icon="clipboard-list" label="ออเดอร์" />
+                            <NavButton active={activeTab === 'sale'} onClick={() => setActiveTab('sale')} icon="shopping-cart" label="ขายหน้าร้าน" />
                             <NavButton active={activeTab === 'pos'} onClick={() => setActiveTab('pos')} icon="plus-circle" label="บันทึกแต้ม (POS)" />
                             <NavButton active={activeTab === 'customers'} onClick={() => setActiveTab('customers')} icon="users" label="รายชื่อลูกค้า" />
                             <NavButton active={activeTab === 'history'} onClick={() => setActiveTab('history')} icon="history" label="ประวัติทำรายการ" />
+                            <NavButton active={activeTab === 'reports'} onClick={() => setActiveTab('reports')} icon="bar-chart-3" label="รายงานประจำวัน" />
                             <NavButton active={activeTab === 'menu'} onClick={() => setActiveTab('menu')} icon="book-open" label="จัดการเมนู" />
                             <NavButton active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} icon="gift" label="จัดการรางวัล" />
                         </nav>
 
-                        <div className="hidden md:block pt-4 border-t border-coffee-900 text-xs text-stone-500 text-center">
+                        <div className="hidden md:block pt-4 border-t border-coffee-200 text-xs text-coffee-600 text-center">
                             <p>Little Homie Coffee</p>
-                            <p className="mt-1 text-[10px] text-stone-600">iPad &amp; iPhone Terminal Ready</p>
+                            <p className="mt-1 text-[10px] text-coffee-500">iPad &amp; iPhone Terminal Ready</p>
                         </div>
                     </aside>
 
                     <main className="flex-1 overflow-y-auto p-4 md:p-8">
                         {activeTab === 'orders' && (
-                            <OrdersBoardView orders={orders} onUpdateStatus={updateOrderStatus} />
+                            <OrdersBoardView orders={orders} onUpdateStatus={updateOrderStatus} onRequestCancel={setCancellingOrder} />
+                            )}
+
+                            {activeTab === 'sale' && (
+                            <CounterSaleView
+                            menuItems={menuItems}
+                            customers={customers}
+                            formatPhone={formatPhone}
+                            showToast={showToast}
+                            />
                         )}
 
                         {activeTab === 'pos' && (
@@ -454,6 +576,10 @@
                             <HistoryView history={history} formatPhone={formatPhone} />
                         )}
 
+                        {activeTab === 'reports' && (
+                            <ReportsView orders={orders} cashbook={cashbook} showToast={showToast} onRequestCancel={setCancellingOrder} />
+                        )}
+
                         {activeTab === 'menu' && (
                             <MenuManageView menuItems={menuItems} showToast={showToast} />
                         )}
@@ -469,7 +595,7 @@
 
                     {showNewCustomerModal && (
                         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-                            <div className="bg-white rounded-3xl p-6 w-full max-w-md shadow-2xl border border-stone-100 transform transition-all animate-in fade-in zoom-in duration-200">
+                            <div className="bg-white rounded-3xl p-6 w-full max-w-md shadow-sm border border-stone-100 transform transition-all animate-in fade-in zoom-in duration-200">
                                 <div className="flex justify-between items-center mb-5">
                                     <div className="flex items-center space-x-2">
                                         <div className="w-8 h-8 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center">
@@ -521,7 +647,7 @@
                                         </button>
                                         <button
                                             type="submit"
-                                            className="flex-1 py-3 px-4 bg-amber-600 hover:bg-amber-700 text-white rounded-2xl font-medium shadow-lg shadow-amber-600/30 active:scale-95 transition-all"
+                                            className="flex-1 py-3 px-4 bg-amber-600 hover:bg-amber-700 text-white rounded-2xl font-medium shadow-sm active:scale-95 transition-all"
                                         >
                                             บันทึกข้อมูล
                                         </button>
@@ -533,11 +659,11 @@
 
                     {showRedeemModal && selectedCustomer && (
                         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-                            <div className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl border border-stone-100 transform transition-all">
+                            <div className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-sm border border-stone-100 transform transition-all">
                                 <div className="flex justify-between items-center mb-4">
                                     <div>
                                         <h3 className="text-xl font-bold text-stone-800">แลกรับของรางวัล</h3>
-                                        <p className="text-xs text-stone-500">สำหรับ {selectedCustomer.name} (คงเหลือ {selectedCustomer.points} แต้ม)</p>
+                                        <p className="text-xs text-stone-500">สำหรับ {memberLabel(selectedCustomer)} (คงเหลือ {selectedCustomer.points} แต้ม)</p>
                                     </div>
                                     <button onClick={() => setShowRedeemModal(false)} className="text-stone-400 hover:text-stone-600">
                                         <Icon name="x" className="w-6 h-6"></Icon>
@@ -593,6 +719,47 @@
                         </div>
                     )}
 
+                    {cancellingOrder && (
+                        <ConfirmModal
+                            title={`ยกเลิกออเดอร์ #${cancellingOrder.orderNumber}?`}
+                            message={
+                                `ยอด ${(cancellingOrder.total || 0).toLocaleString()} บาท จะถูกตัดออกจากยอดขายและรายรับ` +
+                                (cancellingOrder.pointsAwarded > 0 ? ` และคืนแต้มสะสม ${cancellingOrder.pointsAwarded} แต้ม` : '')
+                            }
+                            confirmLabel="ยกเลิกออเดอร์"
+                            onClose={() => setCancellingOrder(null)}
+                            onConfirm={confirmCancelOrder}
+                        />
+                    )}
+
+                </div>
+            );
+        }
+
+        function ConfirmModal({ title, message, confirmLabel, onClose, onConfirm }) {
+            return (
+                <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-sm border border-stone-100 text-center pop-in">
+                        <div className="w-14 h-14 mx-auto rounded-full bg-red-100 text-red-600 flex items-center justify-center mb-4">
+                            <Icon name="alert-triangle" className="w-6 h-6"></Icon>
+                        </div>
+                        <h3 className="text-lg font-bold text-stone-800">{title}</h3>
+                        <p className="text-sm text-stone-500 mt-1">{message}</p>
+                        <div className="pt-5 flex space-x-3">
+                            <button
+                                onClick={onClose}
+                                className="flex-1 py-3 px-4 border border-stone-200 rounded-2xl font-medium text-stone-600 hover:bg-stone-50"
+                            >
+                                ปิด
+                            </button>
+                            <button
+                                onClick={onConfirm}
+                                className="flex-1 py-3 px-4 bg-red-600 hover:bg-red-700 text-white rounded-2xl font-medium shadow-sm active:scale-95 transition-all"
+                            >
+                                {confirmLabel}
+                            </button>
+                        </div>
+                    </div>
                 </div>
             );
         }
@@ -602,7 +769,7 @@
                 <button
                     onClick={onClick}
                     className={`flex items-center space-x-3 px-4 py-3 rounded-2xl text-sm font-medium transition-all whitespace-nowrap ${
-                        active ? 'bg-amber-600 text-white shadow-md' : 'text-stone-400 hover:bg-coffee-900 hover:text-stone-200'
+                        active ? 'bg-amber-300 text-amber-900' : 'text-coffee-600 hover:bg-coffee-200 hover:text-coffee-900'
                     }`}
                 >
                     <Icon name={icon} className="w-5 h-5"></Icon>
@@ -611,7 +778,7 @@
             );
         }
 
-        function OrdersBoardView({ orders, onUpdateStatus }) {
+        function OrdersBoardView({ orders, onUpdateStatus, onRequestCancel }) {
             const columns = useMemo(() => ({
                 new: orders.filter(o => o.status === 'new'),
                 preparing: orders.filter(o => o.status === 'preparing'),
@@ -668,14 +835,14 @@
                                                 <span className="text-sm font-bold text-stone-700">{order.total} บาท</span>
                                                 <div className="flex space-x-1.5">
                                                     <button
-                                                        onClick={() => onUpdateStatus(order, 'cancelled')}
+                                                        onClick={() => onRequestCancel(order)}
                                                         className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium text-red-500 hover:bg-red-50"
                                                     >
                                                         ยกเลิก
                                                     </button>
                                                     <button
                                                         onClick={() => onUpdateStatus(order, col.nextStatus)}
-                                                        className="px-3 py-1.5 rounded-lg text-xs font-bold bg-coffee-900 hover:bg-coffee-950 text-white active:scale-95 transition-all"
+                                                        className="px-3 py-1.5 rounded-lg text-xs font-bold bg-sky-500 hover:bg-sky-600 text-white active:scale-95 transition-all"
                                                     >
                                                         {col.nextLabel}
                                                     </button>
@@ -693,16 +860,281 @@
                             <summary className="text-xs font-medium text-stone-400 cursor-pointer px-2">ประวัติล่าสุด ({columns.past.length})</summary>
                             <div className="mt-2 bg-white rounded-2xl border border-stone-100 divide-y divide-stone-50 max-h-64 overflow-y-auto">
                                 {columns.past.map(order => (
-                                    <div key={order.id} className="p-3 flex justify-between items-center text-sm">
-                                        <span className="text-stone-600">#{order.orderNumber} · {order.customerName}</span>
-                                        <span className={`text-xs font-medium ${order.status === 'cancelled' ? 'text-red-500' : 'text-emerald-600'}`}>
-                                            {ORDER_STATUS_LABEL[order.status]}
-                                        </span>
+                                    <div key={order.id} className="p-3 flex justify-between items-center text-sm gap-3">
+                                        <span className="text-stone-600 min-w-0 truncate">#{order.orderNumber} · {order.customerName}</span>
+                                        <div className="flex items-center space-x-2 shrink-0">
+                                            <span className={`text-xs font-medium ${order.status === 'cancelled' ? 'text-red-500' : 'text-emerald-600'}`}>
+                                                {ORDER_STATUS_LABEL[order.status]}
+                                            </span>
+                                            {order.status !== 'cancelled' && (
+                                                <button
+                                                    onClick={() => onRequestCancel(order)}
+                                                    className="px-2.5 py-1 rounded-lg text-[11px] font-medium text-red-500 hover:bg-red-50"
+                                                >
+                                                    ยกเลิก
+                                                </button>
+                                            )}
+                                        </div>
                                     </div>
                                 ))}
                             </div>
                         </details>
                     )}
+                </div>
+            );
+        }
+
+        // Staff-side order entry for walk-in customers: tap menu items, optionally attach a
+        // member's phone, and the sale lands on the order board and the daily report like any
+        // order placed from the customer page.
+        function CounterSaleView({ menuItems, customers, formatPhone, showToast }) {
+            const [cart, setCart] = useState({});
+            const [orderType, setOrderType] = useState('takeaway');
+            const [tableNumber, setTableNumber] = useState('');
+            const [customerName, setCustomerName] = useState('');
+            const [phone, setPhone] = useState('');
+            const [note, setNote] = useState('');
+            const [submitting, setSubmitting] = useState(false);
+
+            const grouped = useMemo(() => {
+                const byCat = {};
+                menuItems.filter(m => m.available !== false).forEach(item => {
+                    if (!byCat[item.category]) byCat[item.category] = [];
+                    byCat[item.category].push(item);
+                });
+                return byCat;
+            }, [menuItems]);
+
+            const cartItems = useMemo(() => Object.entries(cart)
+                .filter(([, qty]) => qty > 0)
+                .map(([menuId, qty]) => {
+                    const item = menuItems.find(m => m.id === menuId);
+                    return item ? { menuId, name: item.name, price: item.price, qty } : null;
+                })
+                .filter(Boolean), [cart, menuItems]);
+
+            const totalQty = cartItems.reduce((sum, i) => sum + i.qty, 0);
+            const total = cartItems.reduce((sum, i) => sum + i.price * i.qty, 0);
+
+            const cleanPhone = phone.replace(/\D/g, '');
+            const member = customers.find(c => c.phone === cleanPhone) || null;
+
+            const changeQty = (menuId, delta) => {
+                playSound('tap');
+                setCart(prev => ({ ...prev, [menuId]: Math.max(0, (prev[menuId] || 0) + delta) }));
+            };
+
+            const handleSubmit = async () => {
+                if (cartItems.length === 0 || submitting) return;
+                if (orderType === 'dine-in' && !tableNumber.trim()) {
+                    showToast('กรุณาระบุเลขโต๊ะ', 'error');
+                    return;
+                }
+                if (cleanPhone && cleanPhone.length < 9) {
+                    showToast('เบอร์สมาชิกไม่ถูกต้อง', 'error');
+                    return;
+                }
+                setSubmitting(true);
+                try {
+                    const orderNumber = await getNextOrderNumber();
+                    const memberName = customerName.trim() || (member ? member.name : '');
+                    await db.collection('orders').add({
+                        orderNumber,
+                        items: cartItems.map(({ menuId, name, price, qty }) => ({ menuId, name, price, qty })),
+                        total,
+                        orderType,
+                        tableNumber: orderType === 'dine-in' ? tableNumber.trim() : '',
+                        customerName: memberName || 'ลูกค้าหน้าร้าน',
+                        phone: cleanPhone,
+                        note: note.trim(),
+                        status: 'new',
+                        itemCount: totalQty,
+                        pointsAwarded: cleanPhone ? totalQty : 0,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    });
+                    // The order is already saved by this point, so a failure while stamping the
+                    // card must not report the sale as failed — that would invite staff to key
+                    // the whole order in a second time.
+                    if (cleanPhone) {
+                        try {
+                            await earnPointsForOrder(cleanPhone, memberName, totalQty, orderNumber);
+                            playSound('stamp');
+                            showToast(`บันทึกออเดอร์ #${orderNumber} · สะสม +${totalQty} แต้ม`);
+                        } catch (e) {
+                            showToast(`บันทึกออเดอร์ #${orderNumber} แล้ว แต่สะสมแต้มไม่สำเร็จ`, 'error');
+                        }
+                    } else {
+                        showToast(`บันทึกออเดอร์ #${orderNumber} สำเร็จ`);
+                    }
+                    setCart({});
+                    setTableNumber('');
+                    setCustomerName('');
+                    setPhone('');
+                    setNote('');
+                } catch (e) {
+                    showToast('บันทึกออเดอร์ไม่สำเร็จ', 'error');
+                } finally {
+                    setSubmitting(false);
+                }
+            };
+
+            return (
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 max-w-7xl mx-auto">
+
+                    <div className="lg:col-span-7 space-y-5">
+                        <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
+                            <h2 className="text-2xl font-bold text-stone-800">ขายหน้าร้าน</h2>
+                            <p className="text-xs text-stone-400 mt-0.5">กดเลือกเมนูเพื่อเปิดออเดอร์ให้ลูกค้าที่หน้าร้าน</p>
+                        </div>
+
+                        {Object.keys(grouped).length === 0 ? (
+                            <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
+                                <p className="text-sm text-stone-400 text-center py-6">ยังไม่มีเมนูที่พร้อมขาย</p>
+                            </div>
+                        ) : (
+                            Object.keys(grouped).map(cat => (
+                                <div key={cat} className="space-y-2">
+                                    <div className="flex items-center space-x-2 px-1">
+                                        <Icon name={CATEGORY_ICONS[cat] || 'utensils'} className="w-4 h-4 text-amber-700"></Icon>
+                                        <h3 className="font-bold text-stone-700 text-sm">{cat}</h3>
+                                    </div>
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                                        {grouped[cat].map(item => {
+                                            const qty = cart[item.id] || 0;
+                                            return (
+                                                <button
+                                                    key={item.id}
+                                                    onClick={() => changeQty(item.id, 1)}
+                                                    className={`relative p-3 rounded-2xl border text-left transition-all active:scale-95 ${
+                                                        qty > 0
+                                                            ? 'bg-amber-50 border-amber-300 shadow-sm'
+                                                            : 'bg-white border-stone-100 hover:border-amber-200'
+                                                    }`}
+                                                >
+                                                    <p className="font-semibold text-stone-800 text-sm leading-tight">{item.name}</p>
+                                                    <p className="text-xs text-amber-700 font-medium mt-1">{item.price} บาท</p>
+                                                    {qty > 0 && (
+                                                        <span className="absolute top-2 right-2 w-6 h-6 rounded-full bg-amber-600 text-white text-xs font-bold flex items-center justify-center">
+                                                            {qty}
+                                                        </span>
+                                                    )}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+
+                    <div className="lg:col-span-5">
+                        <div className="bg-white rounded-3xl p-6 shadow-sm border border-stone-100 space-y-4 lg:sticky lg:top-0">
+                            <h3 className="font-bold text-sm uppercase tracking-wider text-stone-500">รายการที่สั่ง</h3>
+
+                            {cartItems.length === 0 ? (
+                                <p className="text-sm text-stone-400 text-center py-6">ยังไม่ได้เลือกเมนู</p>
+                            ) : (
+                                <div className="space-y-2 max-h-64 overflow-y-auto">
+                                    {cartItems.map(item => (
+                                        <div key={item.menuId} className="flex items-center justify-between gap-2">
+                                            <div className="min-w-0 pr-1">
+                                                <p className="text-sm font-medium text-stone-700 truncate">{item.name}</p>
+                                                <p className="text-xs text-stone-400">{item.price} x {item.qty}</p>
+                                            </div>
+                                            <div className="shrink-0 flex items-center space-x-2 bg-stone-50 rounded-xl px-1.5 py-1.5">
+                                                <button onClick={() => changeQty(item.menuId, -1)} className="w-7 h-7 rounded-lg bg-white text-stone-600 flex items-center justify-center shadow-sm active:scale-90">
+                                                    <Icon name="minus" className="w-4 h-4"></Icon>
+                                                </button>
+                                                <span className="w-5 text-center font-bold text-stone-700 text-sm">{item.qty}</span>
+                                                <button onClick={() => changeQty(item.menuId, 1)} className="w-7 h-7 rounded-lg bg-white text-stone-600 flex items-center justify-center shadow-sm active:scale-90">
+                                                    <Icon name="plus" className="w-4 h-4"></Icon>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+
+                            <div className="flex justify-between items-center pt-3 border-t border-stone-100">
+                                <span className="text-sm font-bold text-stone-700">ยอดรวม</span>
+                                <span className="text-xl font-extrabold text-amber-700">{total.toLocaleString()} บาท</span>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                                <button
+                                    onClick={() => setOrderType('takeaway')}
+                                    className={`py-2.5 rounded-xl text-sm font-medium transition-all ${orderType === 'takeaway' ? 'bg-amber-600 text-white shadow-sm' : 'bg-stone-100 text-stone-500'}`}
+                                >
+                                    กลับบ้าน
+                                </button>
+                                <button
+                                    onClick={() => setOrderType('dine-in')}
+                                    className={`py-2.5 rounded-xl text-sm font-medium transition-all ${orderType === 'dine-in' ? 'bg-amber-600 text-white shadow-sm' : 'bg-stone-100 text-stone-500'}`}
+                                >
+                                    ทานที่ร้าน
+                                </button>
+                            </div>
+
+                            {orderType === 'dine-in' && (
+                                <input
+                                    type="text" value={tableNumber} onChange={e => setTableNumber(e.target.value)} placeholder="เลขโต๊ะ"
+                                    className="w-full bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                                />
+                            )}
+
+                            <div>
+                                <label className="block text-xs font-semibold text-stone-500 uppercase tracking-wider mb-1.5">เบอร์สมาชิก (ถ้ามี)</label>
+                                <input
+                                    type="tel" value={formatPhone(phone)} onChange={e => setPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                                    placeholder="08X-XXX-XXXX"
+                                    className="w-full bg-stone-100 border-none rounded-2xl px-4 py-3 text-base font-semibold text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                                />
+                                {cleanPhone.length >= 9 && (
+                                    member ? (
+                                        <div className="mt-2 bg-emerald-50 border border-emerald-200 rounded-2xl px-3 py-2 text-xs text-emerald-800 flex items-center justify-between gap-2">
+                                            <span className="truncate">{member.name || 'สมาชิก'} · มี {member.points} แต้ม</span>
+                                            <span className="font-bold shrink-0">+{totalQty} แต้ม</span>
+                                        </div>
+                                    ) : (
+                                        <div className="mt-2 bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2 text-xs text-amber-800">
+                                            เบอร์ใหม่ · จะสมัครสมาชิกให้อัตโนมัติ และรับ +{totalQty} แต้ม
+                                        </div>
+                                    )
+                                )}
+                            </div>
+
+                            <input
+                                type="text" value={customerName} onChange={e => setCustomerName(e.target.value)} placeholder="ชื่อลูกค้า (ถ้ามี)"
+                                className="w-full bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                            />
+
+                            <input
+                                type="text" value={note} onChange={e => setNote(e.target.value)} placeholder="หมายเหตุ เช่น หวานน้อย"
+                                className="w-full bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                            />
+
+                            <button
+                                onClick={handleSubmit}
+                                disabled={cartItems.length === 0 || submitting}
+                                className={`w-full py-4 rounded-2xl font-bold text-base shadow-sm transition-all flex items-center justify-center space-x-2 ${
+                                    cartItems.length > 0 && !submitting
+                                        ? 'bg-amber-600 hover:bg-amber-700 text-white active:scale-95'
+                                        : 'bg-stone-200 text-stone-400 cursor-not-allowed'
+                                }`}
+                            >
+                                {submitting ? (
+                                    <Icon name="loader" className="w-5 h-5 animate-spin"></Icon>
+                                ) : (
+                                    <React.Fragment>
+                                        <Icon name="check" className="w-5 h-5"></Icon>
+                                        <span>บันทึกออเดอร์ ({total.toLocaleString()} บาท)</span>
+                                    </React.Fragment>
+                                )}
+                            </button>
+                        </div>
+                    </div>
+
                 </div>
             );
         }
@@ -777,7 +1209,7 @@
                                 type="number" placeholder="ราคา" value={price} onChange={e => setPrice(e.target.value)} required min="0"
                                 className="sm:col-span-2 bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
                             />
-                            <button type="submit" className="sm:col-span-2 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-2xl text-sm transition-all shadow-md shadow-amber-600/20 active:scale-95">
+                            <button type="submit" className="sm:col-span-2 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-2xl text-sm transition-all shadow-sm active:scale-95">
                                 เพิ่ม
                             </button>
                         </form>
@@ -827,7 +1259,7 @@
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 max-w-7xl mx-auto h-full">
 
                     <div className="lg:col-span-5 flex flex-col space-y-4">
-                        <div className="bg-white rounded-3xl p-6 shadow-xl border border-stone-100/80">
+                        <div className="bg-white rounded-3xl p-6 shadow-sm border border-stone-100/80">
                             <label className="block text-xs font-bold uppercase tracking-wider text-stone-400 mb-2">
                                 ค้นหา หรือ ป้อนเบอร์โทรศัพท์ลูกค้า
                             </label>
@@ -883,9 +1315,9 @@
                             <button
                                 onClick={handleSearchCustomer}
                                 disabled={phoneInput.length < 9}
-                                className={`w-full py-3.5 rounded-2xl font-bold text-base shadow-lg transition-all flex items-center justify-center space-x-2 ${
+                                className={`w-full py-3.5 rounded-2xl font-bold text-base shadow-sm transition-all flex items-center justify-center space-x-2 ${
                                     phoneInput.length >= 9
-                                        ? 'bg-amber-600 hover:bg-amber-700 text-white shadow-amber-600/30 active:scale-95'
+                                        ? 'bg-amber-600 hover:bg-amber-700 text-white active:scale-95'
                                         : 'bg-stone-200 text-stone-400 cursor-not-allowed'
                                 }`}
                             >
@@ -897,15 +1329,15 @@
 
                     <div className="lg:col-span-7 flex flex-col justify-between">
                         {selectedCustomer ? (
-                            <div className="bg-white rounded-3xl p-6 shadow-xl border border-stone-100 flex flex-col h-full justify-between space-y-6">
+                            <div className="bg-white rounded-3xl p-6 shadow-sm border border-stone-100 flex flex-col h-full justify-between space-y-6">
 
                                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center pb-4 border-b border-stone-100 gap-3">
                                     <div className="flex items-center space-x-3">
                                         <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-800 font-bold text-xl flex items-center justify-center shadow-inner">
-                                            {selectedCustomer.name.slice(0, 2)}
+                                            {memberLabel(selectedCustomer).slice(0, 2)}
                                         </div>
                                         <div>
-                                            <h2 className="text-xl font-bold text-stone-800">{selectedCustomer.name}</h2>
+                                            <h2 className="text-xl font-bold text-stone-800">{memberLabel(selectedCustomer)}</h2>
                                             <p className="text-xs font-semibold text-stone-400">{formatPhone(selectedCustomer.phone)}</p>
                                         </div>
                                     </div>
@@ -919,7 +1351,7 @@
                                         </button>
                                         <button
                                             onClick={() => setShowRedeemModal(true)}
-                                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 active:scale-95 transition-all flex items-center space-x-1"
+                                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-sm active:scale-95 transition-all flex items-center space-x-1"
                                         >
                                             <Icon name="gift" className="w-4 h-4"></Icon>
                                             <span>แลกของรางวัล</span>
@@ -927,19 +1359,19 @@
                                     </div>
                                 </div>
 
-                                <div className="bg-gradient-to-br from-coffee-950 to-coffee-900 text-white rounded-3xl p-6 shadow-2xl relative overflow-hidden">
-                                    <div className="absolute right-0 bottom-0 opacity-10 pointer-events-none transform translate-x-4 translate-y-4">
-                                        <Icon name="coffee" className="w-48 h-48 text-white"></Icon>
+                                <div className="bg-gradient-to-br from-sky-200 to-sky-100 text-sky-950 rounded-3xl p-6 relative overflow-hidden">
+                                    <div className="absolute right-0 bottom-0 opacity-30 pointer-events-none transform translate-x-4 translate-y-4">
+                                        <Icon name="coffee" className="w-48 h-48 text-sky-400"></Icon>
                                     </div>
 
                                     <div className="flex justify-between items-center mb-6">
                                         <div>
-                                            <span className="text-[10px] uppercase font-bold tracking-widest text-amber-400">Little Homie Loyalty Card</span>
-                                            <h3 className="text-lg font-bold text-stone-100">บัตรสะสมแต้มดิจิทัล</h3>
+                                            <span className="text-[10px] uppercase font-bold tracking-widest text-sky-700">Little Homie Loyalty Card</span>
+                                            <h3 className="text-lg font-bold text-sky-950">บัตรสะสมแต้มดิจิทัล</h3>
                                         </div>
                                         <div className="text-right">
-                                            <span className="text-2xl font-extrabold text-amber-400">{selectedCustomer.points}</span>
-                                            <span className="text-xs text-stone-400"> แต้มสะสม</span>
+                                            <span className="text-2xl font-extrabold text-amber-700">{selectedCustomer.points}</span>
+                                            <span className="text-xs text-sky-700"> แต้มสะสม</span>
                                         </div>
                                     </div>
 
@@ -951,21 +1383,21 @@
                                                     key={index}
                                                     className={`aspect-square rounded-2xl flex flex-col items-center justify-center border-2 transition-all relative ${
                                                         isStamped
-                                                            ? 'bg-amber-500 border-amber-400 text-stone-900 shadow-lg shadow-amber-500/40 stamp-animation'
-                                                            : 'bg-coffee-900/80 border-coffee-800/60 text-stone-500'
+                                                            ? 'bg-amber-300 border-amber-400 text-amber-900 stamp-animation'
+                                                            : 'bg-white/60 border-sky-300 text-sky-600'
                                                     }`}
                                                 >
                                                     {isStamped ? (
                                                         <Icon name="coffee" className="w-6 h-6 stroke-[2.5]"></Icon>
                                                     ) : (
-                                                        <span className="text-xs font-bold text-stone-600">{index + 1}</span>
+                                                        <span className="text-xs font-bold text-sky-500">{index + 1}</span>
                                                     )}
                                                 </div>
                                             );
                                         })}
                                     </div>
 
-                                    <div className="mt-4 pt-3 border-t border-coffee-900 flex justify-between items-center text-[11px] text-stone-400">
+                                    <div className="mt-4 pt-3 border-t border-sky-300 flex justify-between items-center text-[11px] text-sky-700">
                                         <span>สะสมครบ {maxStampsPerCard} แต้ม รับเครื่องดื่มฟรี!</span>
                                         <span>สั่งไปแล้ว {selectedCustomer.totalDrinks || 0} แก้ว ({selectedCustomer.orderCount || 0} ครั้ง)</span>
                                     </div>
@@ -978,21 +1410,21 @@
                                     <div className="grid grid-cols-3 gap-3">
                                         <button
                                             onClick={() => handleAddPoints(1)}
-                                            className="py-4 bg-amber-600 hover:bg-amber-700 text-white rounded-2xl font-bold shadow-lg shadow-amber-600/30 active:scale-95 transition-all flex flex-col items-center justify-center space-y-1"
+                                            className="py-4 bg-amber-600 hover:bg-amber-700 text-white rounded-2xl font-bold shadow-sm active:scale-95 transition-all flex flex-col items-center justify-center space-y-1"
                                         >
                                             <span className="text-xl">+1 แต้ม</span>
                                             <span className="text-[11px] text-amber-100 font-normal">ซื้อ 1 แก้ว</span>
                                         </button>
                                         <button
                                             onClick={() => handleAddPoints(2)}
-                                            className="py-4 bg-amber-700 hover:bg-amber-800 text-white rounded-2xl font-bold shadow-lg shadow-amber-700/30 active:scale-95 transition-all flex flex-col items-center justify-center space-y-1"
+                                            className="py-4 bg-amber-700 hover:bg-amber-800 text-white rounded-2xl font-bold shadow-sm active:scale-95 transition-all flex flex-col items-center justify-center space-y-1"
                                         >
                                             <span className="text-xl">+2 แต้ม</span>
                                             <span className="text-[11px] text-amber-100 font-normal">ซื้อ 2 แก้ว</span>
                                         </button>
                                         <button
                                             onClick={() => handleAddPoints(3)}
-                                            className="py-4 bg-amber-800 hover:bg-amber-900 text-white rounded-2xl font-bold shadow-lg shadow-amber-800/30 active:scale-95 transition-all flex flex-col items-center justify-center space-y-1"
+                                            className="py-4 bg-amber-800 hover:bg-amber-900 text-white rounded-2xl font-bold shadow-sm active:scale-95 transition-all flex flex-col items-center justify-center space-y-1"
                                         >
                                             <span className="text-xl">+3 แต้ม</span>
                                             <span className="text-[11px] text-amber-100 font-normal">ซื้อ 3 แก้ว</span>
@@ -1004,7 +1436,7 @@
 
                             </div>
                         ) : (
-                            <div className="bg-white rounded-3xl p-12 shadow-xl border border-stone-100 flex flex-col items-center justify-center text-center h-full space-y-4">
+                            <div className="bg-white rounded-3xl p-12 shadow-sm border border-stone-100 flex flex-col items-center justify-center text-center h-full space-y-4">
                                 <div className="w-20 h-20 bg-stone-100 rounded-3xl flex items-center justify-center text-stone-400">
                                     <Icon name="user-search" className="w-10 h-10"></Icon>
                                 </div>
@@ -1139,15 +1571,15 @@
                         {filtered.map(customer => (
                             <div
                                 key={customer.id}
-                                className="bg-white p-5 rounded-3xl shadow-sm border border-stone-100 hover:shadow-md transition-all flex flex-col justify-between space-y-4 hover:border-amber-200 group"
+                                className="bg-white p-5 rounded-3xl shadow-sm border border-stone-100 hover:shadow-sm transition-all flex flex-col justify-between space-y-4 hover:border-amber-200 group"
                             >
                                 <div className="flex justify-between items-start cursor-pointer" onClick={() => onSelectCustomer(customer)}>
                                     <div className="flex items-center space-x-3">
                                         <div className="w-10 h-10 rounded-2xl bg-stone-100 text-stone-700 font-bold flex items-center justify-center group-hover:bg-amber-100 group-hover:text-amber-800 transition-colors">
-                                            {customer.name.slice(0, 2)}
+                                            {memberLabel(customer).slice(0, 2)}
                                         </div>
                                         <div>
-                                            <h3 className="font-bold text-stone-800">{customer.name}</h3>
+                                            <h3 className="font-bold text-stone-800">{memberLabel(customer)}</h3>
                                             <p className="text-xs text-stone-400 font-medium">{formatPhone(customer.phone)}</p>
                                         </div>
                                     </div>
@@ -1219,7 +1651,7 @@
 
             return (
                 <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-                    <div className="bg-white rounded-3xl p-6 w-full max-w-md shadow-2xl border border-stone-100 transform transition-all animate-in fade-in zoom-in duration-200">
+                    <div className="bg-white rounded-3xl p-6 w-full max-w-md shadow-sm border border-stone-100 transform transition-all animate-in fade-in zoom-in duration-200">
                         <div className="flex justify-between items-center mb-5">
                             <div className="flex items-center space-x-2">
                                 <div className="w-8 h-8 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center">
@@ -1281,7 +1713,7 @@
                                 </button>
                                 <button
                                     type="submit"
-                                    className="flex-1 py-3 px-4 bg-amber-600 hover:bg-amber-700 text-white rounded-2xl font-medium shadow-lg shadow-amber-600/30 active:scale-95 transition-all"
+                                    className="flex-1 py-3 px-4 bg-amber-600 hover:bg-amber-700 text-white rounded-2xl font-medium shadow-sm active:scale-95 transition-all"
                                 >
                                     บันทึกการแก้ไข
                                 </button>
@@ -1295,13 +1727,13 @@
         function DeleteCustomerModal({ customer, formatPhone, onClose, onConfirm }) {
             return (
                 <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-                    <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl border border-stone-100 text-center transform transition-all animate-in fade-in zoom-in duration-200">
+                    <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-sm border border-stone-100 text-center transform transition-all animate-in fade-in zoom-in duration-200">
                         <div className="w-14 h-14 mx-auto rounded-full bg-red-100 text-red-600 flex items-center justify-center mb-4">
                             <Icon name="trash-2" className="w-6 h-6"></Icon>
                         </div>
                         <h3 className="text-lg font-bold text-stone-800">ลบสมาชิกนี้?</h3>
                         <p className="text-sm text-stone-500 mt-1">
-                            {customer.name} ({formatPhone(customer.phone)}) จะถูกลบออกจากระบบถาวร พร้อมแต้มสะสม {customer.points || 0} แต้ม
+                            {memberLabel(customer)} ({formatPhone(customer.phone)}) จะถูกลบออกจากระบบถาวร พร้อมแต้มสะสม {customer.points || 0} แต้ม
                         </p>
                         <div className="pt-5 flex space-x-3">
                             <button
@@ -1312,7 +1744,7 @@
                             </button>
                             <button
                                 onClick={onConfirm}
-                                className="flex-1 py-3 px-4 bg-red-600 hover:bg-red-700 text-white rounded-2xl font-medium shadow-lg shadow-red-600/30 active:scale-95 transition-all"
+                                className="flex-1 py-3 px-4 bg-red-600 hover:bg-red-700 text-white rounded-2xl font-medium shadow-sm active:scale-95 transition-all"
                             >
                                 ลบสมาชิก
                             </button>
@@ -1354,6 +1786,219 @@
                                 </div>
                             ))}
                         </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function ReportsView({ orders, cashbook, showToast, onRequestCancel }) {
+            const [type, setType] = useState('income');
+            const [entryDate, setEntryDate] = useState(() => dateKey(new Date()));
+            const [note, setNote] = useState('');
+            const [amount, setAmount] = useState('');
+
+            const salesByDay = useMemo(() => {
+                const map = {};
+                orders.forEach(order => {
+                    if (!order.createdAt) return;
+                    const date = order.createdAt.toDate ? order.createdAt.toDate() : new Date(order.createdAt);
+                    const key = dateKey(date);
+                    if (!map[key]) map[key] = { date: key, count: 0, revenue: 0, cancelledCount: 0 };
+                    if (order.status === 'cancelled') {
+                        map[key].cancelledCount += 1;
+                    } else {
+                        map[key].count += 1;
+                        map[key].revenue += order.total || 0;
+                    }
+                });
+                return Object.values(map).sort((a, b) => b.date.localeCompare(a.date));
+            }, [orders]);
+
+            // Income is sales revenue plus any manually-logged income (e.g. cash income outside
+            // the ordering flow); expense is manual only since nothing else in the app spends money.
+            // Sales are listed order by order so a wrong sale can be voided from the report itself.
+            const ledgerByDay = useMemo(() => {
+                const map = {};
+                const dayOf = (date) => {
+                    if (!map[date]) map[date] = { date, salesRevenue: 0, manualIncome: 0, expense: 0, orders: [], entries: [] };
+                    return map[date];
+                };
+                orders.forEach(order => {
+                    if (!order.createdAt || order.status === 'cancelled') return;
+                    const date = order.createdAt.toDate ? order.createdAt.toDate() : new Date(order.createdAt);
+                    const day = dayOf(dateKey(date));
+                    day.salesRevenue += order.total || 0;
+                    day.orders.push(order);
+                });
+                cashbook.forEach(entry => {
+                    const day = dayOf(entry.date);
+                    if (entry.type === 'income') day.manualIncome += entry.amount;
+                    else day.expense += entry.amount;
+                    day.entries.push(entry);
+                });
+                return Object.values(map)
+                    .map(day => ({ ...day, income: day.salesRevenue + day.manualIncome, net: day.salesRevenue + day.manualIncome - day.expense }))
+                    .sort((a, b) => b.date.localeCompare(a.date));
+            }, [orders, cashbook]);
+
+            const grandTotals = useMemo(() => {
+                const salesRevenue = salesByDay.reduce((sum, day) => sum + day.revenue, 0);
+                const manual = cashbook.reduce((acc, entry) => {
+                    if (entry.type === 'income') acc.income += entry.amount;
+                    else acc.expense += entry.amount;
+                    return acc;
+                }, { income: 0, expense: 0 });
+                return { salesRevenue, manualIncome: manual.income, income: salesRevenue + manual.income, expense: manual.expense };
+            }, [salesByDay, cashbook]);
+
+            const handleAddEntry = (e) => {
+                e.preventDefault();
+                const amt = parseFloat(amount);
+                if (!amt || amt <= 0 || !note.trim() || !entryDate) return;
+                db.collection('cashbook').add({
+                    type, amount: amt, note: note.trim(), date: entryDate,
+                    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                }).then(() => {
+                    setNote('');
+                    setAmount('');
+                    showToast(type === 'income' ? 'บันทึกรายรับสำเร็จ' : 'บันทึกรายจ่ายสำเร็จ');
+                }).catch(() => showToast('บันทึกไม่สำเร็จ', 'error'));
+            };
+
+            const handleDeleteEntry = (entry) => {
+                db.collection('cashbook').doc(entry.id).delete()
+                    .then(() => showToast('ลบรายการเรียบร้อยแล้ว'))
+                    .catch(() => showToast('ลบไม่สำเร็จ', 'error'));
+            };
+
+            return (
+                <div className="max-w-5xl mx-auto space-y-6">
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
+                        <h2 className="text-2xl font-bold text-stone-800">รายงานประจำวัน</h2>
+                        <p className="text-xs text-stone-400 mt-0.5">สรุปยอดขายและรายรับ-รายจ่ายของร้าน</p>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100 space-y-2">
+                        <h3 className="font-bold text-stone-800 mb-2 text-sm uppercase tracking-wider text-stone-500">สรุปยอดขายรายวัน</h3>
+                        {salesByDay.length === 0 ? (
+                            <p className="text-sm text-stone-400 text-center py-6">ยังไม่มีออเดอร์</p>
+                        ) : (
+                            <div className="divide-y divide-stone-100">
+                                {salesByDay.map(day => (
+                                    <div key={day.date} className="py-3 flex items-center justify-between">
+                                        <div>
+                                            <p className="font-semibold text-stone-700 text-sm">{day.date}</p>
+                                            <p className="text-xs text-stone-400">
+                                                {day.count} ออเดอร์{day.cancelledCount > 0 ? ` · ยกเลิก ${day.cancelledCount}` : ''}
+                                            </p>
+                                        </div>
+                                        <span className="font-bold text-amber-700">{day.revenue.toLocaleString()} บาท</span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100 space-y-5">
+                        <h3 className="font-bold text-stone-800 text-sm uppercase tracking-wider text-stone-500">บันทึกรายรับ-รายจ่าย</h3>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                            <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4">
+                                <p className="text-xs text-emerald-700 font-semibold">รายรับรวมทั้งหมด</p>
+                                <p className="text-xl font-extrabold text-emerald-700 mt-1">{grandTotals.income.toLocaleString()} บาท</p>
+                                <p className="text-[11px] text-emerald-600/80 mt-1">ยอดขาย {grandTotals.salesRevenue.toLocaleString()} + รายรับอื่น {grandTotals.manualIncome.toLocaleString()}</p>
+                            </div>
+                            <div className="bg-red-50 border border-red-200 rounded-2xl p-4">
+                                <p className="text-xs text-red-600 font-semibold">รายจ่ายรวมทั้งหมด</p>
+                                <p className="text-xl font-extrabold text-red-600 mt-1">{grandTotals.expense.toLocaleString()} บาท</p>
+                            </div>
+                            <div className={`rounded-2xl p-4 border ${grandTotals.income - grandTotals.expense >= 0 ? 'bg-amber-50 border-amber-200' : 'bg-red-50 border-red-200'}`}>
+                                <p className="text-xs font-semibold text-stone-500">คงเหลือสุทธิ</p>
+                                <p className={`text-xl font-extrabold mt-1 ${grandTotals.income - grandTotals.expense >= 0 ? 'text-amber-700' : 'text-red-600'}`}>
+                                    {(grandTotals.income - grandTotals.expense).toLocaleString()} บาท
+                                </p>
+                            </div>
+                        </div>
+
+                        <form onSubmit={handleAddEntry} className="grid grid-cols-1 sm:grid-cols-12 gap-3 pt-4 border-t border-stone-100">
+                            <div className="sm:col-span-3 grid grid-cols-2 gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setType('income')}
+                                    className={`py-3 rounded-xl text-sm font-medium transition-all ${type === 'income' ? 'bg-emerald-600 text-white shadow-sm' : 'bg-stone-100 text-stone-500'}`}
+                                >
+                                    รายรับ
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setType('expense')}
+                                    className={`py-3 rounded-xl text-sm font-medium transition-all ${type === 'expense' ? 'bg-red-500 text-white shadow-sm' : 'bg-stone-100 text-stone-500'}`}
+                                >
+                                    รายจ่าย
+                                </button>
+                            </div>
+                            <input
+                                type="date" value={entryDate} onChange={e => setEntryDate(e.target.value)} required
+                                className="sm:col-span-2 bg-stone-100 border-none rounded-2xl px-3 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                            />
+                            <input
+                                type="text" placeholder="รายละเอียด เช่น ค่าซื้อนม" value={note} onChange={e => setNote(e.target.value)} required
+                                className="sm:col-span-4 bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                            />
+                            <input
+                                type="number" placeholder="จำนวนเงิน" value={amount} onChange={e => setAmount(e.target.value)} required min="0" step="0.01"
+                                className="sm:col-span-2 bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                            />
+                            <button type="submit" className="sm:col-span-1 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-2xl text-sm transition-all shadow-sm active:scale-95">
+                                เพิ่ม
+                            </button>
+                        </form>
+
+                        {ledgerByDay.length === 0 ? (
+                            <p className="text-sm text-stone-400 text-center py-6">ยังไม่มีรายการรายรับ-รายจ่าย</p>
+                        ) : (
+                            <div className="space-y-4">
+                                {ledgerByDay.map(day => (
+                                    <div key={day.date} className="border border-stone-100 rounded-2xl overflow-hidden">
+                                        <div className="bg-stone-50 px-4 py-2.5 flex flex-wrap gap-x-3 justify-between items-center text-xs font-semibold text-stone-500">
+                                            <span>{day.date}</span>
+                                            <span>
+                                                รับ {day.income.toLocaleString()} · จ่าย {day.expense.toLocaleString()} · สุทธิ {day.net.toLocaleString()} บาท
+                                            </span>
+                                        </div>
+                                        <div className="divide-y divide-stone-50">
+                                            {day.orders.map(order => (
+                                                <div key={order.id} className="px-4 py-2.5 flex items-center justify-between text-sm gap-3 bg-emerald-50/40">
+                                                    <span className="text-stone-600 min-w-0 truncate flex items-center gap-1.5">
+                                                        <Icon name="shopping-bag" className="w-3.5 h-3.5 text-emerald-600 shrink-0"></Icon>
+                                                        ขาย #{order.orderNumber} · {order.items.map(i => `${i.name} x${i.qty}`).join(', ')}
+                                                    </span>
+                                                    <div className="flex items-center space-x-3 shrink-0">
+                                                        <span className="font-semibold text-emerald-600">+{(order.total || 0).toLocaleString()} บาท</span>
+                                                        <button onClick={() => onRequestCancel(order)} className="text-stone-300 hover:text-red-500 transition-colors">
+                                                            <Icon name="x" className="w-4 h-4"></Icon>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                            {day.entries.map(entry => (
+                                                <div key={entry.id} className="px-4 py-2.5 flex items-center justify-between text-sm gap-3">
+                                                    <span className="text-stone-600 min-w-0 truncate">{entry.note}</span>
+                                                    <div className="flex items-center space-x-3 shrink-0">
+                                                        <span className={`font-semibold ${entry.type === 'income' ? 'text-emerald-600' : 'text-red-500'}`}>
+                                                            {entry.type === 'income' ? '+' : '-'}{entry.amount.toLocaleString()} บาท
+                                                        </span>
+                                                        <button onClick={() => handleDeleteEntry(entry)} className="text-stone-300 hover:text-red-500 transition-colors">
+                                                            <Icon name="x" className="w-4 h-4"></Icon>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                     </div>
                 </div>
             );
@@ -1414,7 +2059,7 @@
                             />
                             <button
                                 type="submit"
-                                className="sm:col-span-2 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-2xl text-sm transition-all shadow-md shadow-amber-600/20 active:scale-95"
+                                className="sm:col-span-2 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-2xl text-sm transition-all shadow-sm active:scale-95"
                             >
                                 เพิ่มรางวัล
                             </button>
