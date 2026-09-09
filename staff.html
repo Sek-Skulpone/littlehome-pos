@@ -1090,18 +1090,38 @@
                                     placeholder="08X-XXX-XXXX"
                                     className="w-full bg-stone-100 border-none rounded-2xl px-4 py-3 text-base font-semibold text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
                                 />
-                                {cleanPhone.length >= 9 && (
-                                    member ? (
-                                        <div className="mt-2 bg-emerald-50 border border-emerald-200 rounded-2xl px-3 py-2 text-xs text-emerald-800 flex items-center justify-between gap-2">
-                                            <span className="truncate">{member.name || 'สมาชิก'} · มี {member.points} แต้ม</span>
-                                            <span className="font-bold shrink-0">+{totalQty} แต้ม</span>
+                                {member ? (
+                                    <div className="mt-2 bg-sky-50 border border-sky-200 rounded-2xl p-3 space-y-2">
+                                        <div className="flex items-center justify-between gap-2">
+                                            <div className="flex items-center space-x-2 min-w-0">
+                                                <div className="w-9 h-9 rounded-xl bg-sky-200 text-sky-900 font-bold text-sm flex items-center justify-center shrink-0">
+                                                    {memberLabel(member).slice(0, 2)}
+                                                </div>
+                                                <div className="min-w-0">
+                                                    <p className="font-bold text-stone-800 text-sm truncate">{memberLabel(member)}</p>
+                                                    <p className="text-[11px] text-stone-500">{formatPhone(member.phone)}</p>
+                                                </div>
+                                            </div>
+                                            <div className="text-right shrink-0">
+                                                <p className="text-xl font-extrabold text-amber-700 leading-none">{member.points || 0}</p>
+                                                <p className="text-[10px] text-stone-500 mt-0.5">แต้มสะสม</p>
+                                            </div>
                                         </div>
-                                    ) : (
-                                        <div className="mt-2 bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2 text-xs text-amber-800">
-                                            เบอร์ใหม่ · จะสมัครสมาชิกให้อัตโนมัติ และรับ +{totalQty} แต้ม
+                                        <div className="flex flex-wrap gap-x-3 justify-between items-center text-[11px] text-stone-500 pt-2 border-t border-sky-200">
+                                            <span>สั่งไปแล้ว {member.totalDrinks || 0} แก้ว ({member.orderCount || 0} ครั้ง)</span>
+                                            <span>ล่าสุด {member.lastVisit ? member.lastVisit.split(' ')[0] : '-'}</span>
                                         </div>
-                                    )
-                                )}
+                                        {totalQty > 0 && (
+                                            <p className="text-[11px] font-semibold text-emerald-700">
+                                                ออเดอร์นี้ +{totalQty} แต้ม → รวมเป็น {(member.points || 0) + totalQty} แต้ม
+                                            </p>
+                                        )}
+                                    </div>
+                                ) : cleanPhone.length >= 9 ? (
+                                    <div className="mt-2 bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2 text-xs text-amber-800">
+                                        เบอร์ใหม่ · จะสมัครสมาชิกให้อัตโนมัติ{totalQty > 0 ? ` และรับ +${totalQty} แต้ม` : ''}
+                                    </div>
+                                ) : null}
                             </div>
 
                             <input
