@@ -1455,9 +1455,14 @@
             // Kept in the order SERVE_TYPES declares, so เย็น always reads before ปั่น.
             const toggleServeType = (item, key) => {
                 const current = item.serveTypes || [];
+                const turningOn = !current.includes(key);
                 const next = SERVE_TYPES.map(t => t.key)
-                    .filter(k => (k === key ? !current.includes(k) : current.includes(k)));
-                db.collection('menu').doc(item.id).update({ serveTypes: next })
+                    .filter(k => (k === key ? turningOn : current.includes(k)));
+                const update = { serveTypes: next };
+                // Once an item has options they carry its price on their own, so seed the new
+                // one from what it costs today — the single price field is hidden from then on.
+                if (turningOn) update[`servePrices.${key}`] = priceFor(item, key);
+                db.collection('menu').doc(item.id).update(update)
                     .catch(() => showToast('บันทึกตัวเลือกไม่สำเร็จ', 'error'));
             };
 
@@ -1548,11 +1553,13 @@
                                             onBlur={(e) => e.target.value !== item.name && updateField(item, 'name', e.target.value)}
                                             className="flex-1 min-w-0 bg-transparent font-semibold text-stone-800 text-sm outline-none focus:bg-stone-50 rounded-lg px-1"
                                         />
-                                        <input
-                                            type="number" defaultValue={item.price}
-                                            onBlur={(e) => Number(e.target.value) !== item.price && updateField(item, 'price', parseFloat(e.target.value) || 0)}
-                                            className="w-20 bg-transparent text-amber-700 font-semibold text-sm text-right outline-none focus:bg-stone-50 rounded-lg px-1"
-                                        />
+                                        {(item.serveTypes || []).length === 0 && (
+                                            <input
+                                                type="number" defaultValue={item.price}
+                                                onBlur={(e) => Number(e.target.value) !== item.price && updateField(item, 'price', parseFloat(e.target.value) || 0)}
+                                                className="w-20 bg-transparent text-amber-700 font-semibold text-sm text-right outline-none focus:bg-stone-50 rounded-lg px-1"
+                                            />
+                                        )}
                                         <button
                                             onClick={() => toggleAvailable(item)}
                                             className={`px-3 py-1.5 rounded-xl text-xs font-semibold shrink-0 ${item.available === false ? 'bg-stone-100 text-stone-500' : 'bg-emerald-100 text-emerald-700'}`}
