@@ -41,18 +41,18 @@ service cloud.firestore {
     // which is what keeps it correct and cheap as the months add up.
     match /dailySales/{day} {
       allow read: if true;
-      allow write: if request.resource.data.keys().hasOnly(['date', 'orderCount', 'cancelledCount', 'revenue', 'items'])
-        && request.resource.data.date is string
-        && request.resource.data.orderCount is number
-        && request.resource.data.revenue is number;
+      allow write: if request.resource.data.keys().hasOnly(
+          ['date', 'orderCount', 'cancelledCount', 'revenue', 'items', 'manualIncome', 'manualExpense'])
+        && request.resource.data.date is string;
       allow delete: if false;
     }
 
     match /summary/{docId} {
       allow read: if true;
-      allow write: if request.resource.data.keys().hasOnly(['orderCount', 'revenue'])
-        && request.resource.data.orderCount is number
-        && request.resource.data.revenue is number;
+      allow write: if request.resource.data.keys().hasOnly(['orderCount', 'revenue', 'income', 'expense'])
+        && (!('revenue' in request.resource.data) || request.resource.data.revenue is number)
+        && (!('income' in request.resource.data) || request.resource.data.income is number)
+        && (!('expense' in request.resource.data) || request.resource.data.expense is number);
       allow delete: if false;
     }
 

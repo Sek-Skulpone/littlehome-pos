@@ -183,6 +183,36 @@
             return batch.commit();
         }
 
+        // A member's phone number is their document id, so one read answers "is this a member?"
+        // exactly — no need to hold every member in memory to find them.
+        function lookupCustomer(phone) {
+            return db.collection('customers').doc(phone).get()
+                .then(doc => (doc.exists ? { id: doc.id, ...doc.data() } : null))
+                .catch(() => null);
+        }
+
+        // Manually-logged income and expense roll up the same way as sales, into the day's
+        // document and a running total, so the headline figures stay right once the cashbook
+        // has more entries than any one screen would load.
+        // direction: +1 when an entry is logged, -1 when it is removed.
+        function recordCashbook(dayKey, entry, direction) {
+            const inc = firebase.firestore.FieldValue.increment;
+            const amount = direction * (entry.amount || 0);
+            const income = entry.type === 'income' ? amount : 0;
+            const expense = entry.type === 'income' ? 0 : amount;
+            const batch = db.batch();
+            batch.set(db.collection('dailySales').doc(dayKey), {
+                date: dayKey,
+                manualIncome: inc(income),
+                manualExpense: inc(expense),
+            }, { merge: true });
+            batch.set(db.collection('summary').doc('cashbook'), {
+                income: inc(income),
+                expense: inc(expense),
+            }, { merge: true });
+            return batch.commit();
+        }
+
         // A drink can cost more blended than iced, so the price follows the chosen option and
         // falls back to the item's plain price when the shop hasn't set one.
         function priceFor(item, serveType) {
@@ -364,7 +394,7 @@
 
             const [phoneInput, setPhoneInput] = useState('');
             const [selectedPhone, setSelectedPhone] = useState(null);
-            const selectedCustomer = customers.find(c => c.id === selectedPhone) || null;
+            const [selectedCustomer, setSelectedCustomer] = useState(null);
             const [showNewCustomerModal, setShowNewCustomerModal] = useState(false);
             const [newCustomerName, setNewCustomerName] = useState('');
             const [showRedeemModal, setShowRedeemModal] = useState(false);
@@ -376,6 +406,7 @@
             const [cashbook, setCashbook] = useState([]);
             const [dailySales, setDailySales] = useState([]);
             const [salesSummary, setSalesSummary] = useState({ orderCount: 0, revenue: 0 });
+            const [cashbookSummary, setCashbookSummary] = useState({ income: 0, expense: 0 });
             const seenOrderIds = useRef(null);
 
             useEffect(() => {
@@ -386,12 +417,28 @@
             // page so a walk-in stamp and an online order both land on the same member record.
             // Nothing is seeded here: an empty list means the shop genuinely has no members yet,
             // and writing sample people into a live shop's database would be worse than blank.
+            // Only the recently-active members are held for the list view; anyone older is
+            // still reachable because every lookup goes to the document by phone number.
             useEffect(() => {
-                const unsub = db.collection('customers').onSnapshot((snap) => {
-                    setCustomers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-                });
+                const unsub = db.collection('customers').orderBy('lastVisit', 'desc').limit(200)
+                    .onSnapshot((snap) => {
+                        setCustomers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+                    });
                 return unsub;
             }, []);
+
+            // Watch the member being served, so their points update live even when they are
+            // not among the members loaded above.
+            useEffect(() => {
+                if (!selectedPhone) {
+                    setSelectedCustomer(null);
+                    return;
+                }
+                const unsub = db.collection('customers').doc(selectedPhone).onSnapshot((doc) => {
+                    setSelectedCustomer(doc.exists ? { id: doc.id, ...doc.data() } : null);
+                });
+                return unsub;
+            }, [selectedPhone]);
 
             // Log of manual stamp/redeem actions from this POS (append-only).
             useEffect(() => {
@@ -415,6 +462,13 @@
             useEffect(() => {
                 const unsub = db.collection('summary').doc('sales').onSnapshot((doc) => {
                     setSalesSummary(doc.exists ? doc.data() : { orderCount: 0, revenue: 0 });
+                });
+                return unsub;
+            }, []);
+
+            useEffect(() => {
+                const unsub = db.collection('summary').doc('cashbook').onSnapshot((doc) => {
+                    setCashbookSummary(doc.exists ? doc.data() : { income: 0, expense: 0 });
                 });
                 return unsub;
             }, []);
@@ -478,8 +532,8 @@
                     if (phoneInput.length < 10) {
                         const updated = phoneInput + digit;
                         setPhoneInput(updated);
-                        if (updated.length === 10 && customers.some(c => c.phone === updated)) {
-                            setSelectedPhone(updated);
+                        if (updated.length === 10) {
+                            lookupCustomer(updated).then(found => found && setSelectedPhone(updated));
                         }
                     }
                 }
@@ -488,14 +542,15 @@
             const handleSearchCustomer = () => {
                 if (!phoneInput) return;
                 const cleanPhone = phoneInput.replace(/\D/g, '');
-                const found = customers.find(c => c.phone === cleanPhone);
-                if (found) {
-                    setSelectedPhone(cleanPhone);
-                    showToast(`พบข้อมูลสมาชิก: ${found.name}`);
-                } else {
-                    setSelectedPhone(null);
-                    setShowNewCustomerModal(true);
-                }
+                lookupCustomer(cleanPhone).then(found => {
+                    if (found) {
+                        setSelectedPhone(cleanPhone);
+                        showToast(`พบข้อมูลสมาชิก: ${memberLabel(found)}`);
+                    } else {
+                        setSelectedPhone(null);
+                        setShowNewCustomerModal(true);
+                    }
+                });
             };
 
             const handleAddPoints = (amount = 1) => {
@@ -563,11 +618,11 @@
                 }).catch(() => showToast('ทำรายการไม่สำเร็จ', 'error'));
             };
 
-            const handleRegisterCustomer = (e) => {
+            const handleRegisterCustomer = async (e) => {
                 e.preventDefault();
                 if (!phoneInput || !newCustomerName) return;
                 const cleanPhone = phoneInput.replace(/\D/g, '');
-                if (customers.some(c => c.phone === cleanPhone)) {
+                if (await lookupCustomer(cleanPhone)) {
                     showToast('เบอร์โทรศัพท์นี้ถูกลงทะเบียนแล้ว', 'error');
                     return;
                 }
@@ -730,6 +785,7 @@
                                 cashbook={cashbook}
                                 dailySales={dailySales}
                                 salesSummary={salesSummary}
+                                cashbookSummary={cashbookSummary}
                                 showToast={showToast}
                                 onRequestCancel={setCancellingOrder}
                             />
@@ -1073,7 +1129,19 @@
             const total = cartItems.reduce((sum, i) => sum + i.price * i.qty, 0);
 
             const cleanPhone = phone.replace(/\D/g, '');
-            const member = customers.find(c => c.phone === cleanPhone) || null;
+
+            // Looked up by document id once the number is long enough to be one, so a member
+            // is found whether or not they are among the recently-active ones held in memory.
+            const [member, setMember] = useState(null);
+            useEffect(() => {
+                if (cleanPhone.length < 9) {
+                    setMember(null);
+                    return;
+                }
+                let cancelled = false;
+                lookupCustomer(cleanPhone).then(found => { if (!cancelled) setMember(found); });
+                return () => { cancelled = true; };
+            }, [cleanPhone]);
 
             const changeQty = (key, delta) => {
                 playSound('tap');
@@ -1840,22 +1908,33 @@
             const [searchTerm, setSearchTerm] = useState('');
             const [editingCustomer, setEditingCustomer] = useState(null);
             const [deletingCustomer, setDeletingCustomer] = useState(null);
+            const [phoneMatch, setPhoneMatch] = useState(null);
             const filtered = customers.filter(c =>
                 c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
                 c.phone.includes(searchTerm)
             );
 
-            const handleUpdateCustomer = (customer, { name, phone, points }) => {
+            // The list holds recently-active members, so a search for a phone number that isn't
+            // among them falls back to fetching that member directly.
+            const searchedPhone = searchTerm.replace(/\D/g, '');
+            useEffect(() => {
+                if (searchedPhone.length < 9 || filtered.length > 0) {
+                    setPhoneMatch(null);
+                    return;
+                }
+                let cancelled = false;
+                lookupCustomer(searchedPhone).then(found => { if (!cancelled) setPhoneMatch(found); });
+                return () => { cancelled = true; };
+            }, [searchedPhone, filtered.length]);
+
+            const shown = filtered.length > 0 ? filtered : (phoneMatch ? [phoneMatch] : []);
+
+            const handleUpdateCustomer = async (customer, { name, phone, points }) => {
                 const cleanPhone = phone.replace(/\D/g, '');
                 if (cleanPhone.length < 9) {
                     showToast('เบอร์โทรศัพท์ไม่ถูกต้อง', 'error');
                     return;
                 }
-                if (customers.some(c => c.phone === cleanPhone && c.id !== customer.id)) {
-                    showToast('เบอร์นี้มีสมาชิกอื่นใช้อยู่แล้ว', 'error');
-                    return;
-                }
-
                 const finish = () => {
                     setEditingCustomer(null);
                     showToast('บันทึกข้อมูลสมาชิกสำเร็จ');
@@ -1865,6 +1944,8 @@
                     db.collection('customers').doc(customer.id).update({ name, points })
                         .then(finish)
                         .catch(() => showToast('บันทึกข้อมูลไม่สำเร็จ', 'error'));
+                } else if (await lookupCustomer(cleanPhone)) {
+                    showToast('เบอร์นี้มีสมาชิกอื่นใช้อยู่แล้ว', 'error');
                 } else {
                     // Phone is the document id, so moving to a new number means creating a new
                     // doc and dropping the old one — existing orders/loyaltyEvents rows keep the
@@ -1906,7 +1987,7 @@
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {filtered.map(customer => (
+                        {shown.map(customer => (
                             <div
                                 key={customer.id}
                                 className="bg-white p-5 rounded-3xl shadow-sm border border-stone-100 hover:shadow-sm transition-all flex flex-col justify-between space-y-4 hover:border-amber-200 group"
@@ -2139,7 +2220,7 @@
             );
         }
 
-        function ReportsView({ orders, cashbook, dailySales, salesSummary, showToast, onRequestCancel }) {
+        function ReportsView({ orders, cashbook, dailySales, salesSummary, cashbookSummary, showToast, onRequestCancel }) {
             const [type, setType] = useState('income');
             const [entryDate, setEntryDate] = useState(() => dateKey(new Date()));
             const [note, setNote] = useState('');
@@ -2193,17 +2274,17 @@
                     if (!map[date]) map[date] = { date, salesRevenue: 0, manualIncome: 0, expense: 0, orders: [], entries: [] };
                     return map[date];
                 };
-                dailySales.forEach(day => { dayOf(day.date).salesRevenue = day.revenue || 0; });
+                dailySales.forEach(day => {
+                    const target = dayOf(day.date);
+                    target.salesRevenue = day.revenue || 0;
+                    target.manualIncome = day.manualIncome || 0;
+                    target.expense = day.manualExpense || 0;
+                });
                 orders.forEach(order => {
                     if (order.status === 'cancelled') return;
                     dayOf(orderDayKey(order)).orders.push(order);
                 });
-                cashbook.forEach(entry => {
-                    const day = dayOf(entry.date);
-                    if (entry.type === 'income') day.manualIncome += entry.amount;
-                    else day.expense += entry.amount;
-                    day.entries.push(entry);
-                });
+                cashbook.forEach(entry => { dayOf(entry.date).entries.push(entry); });
                 return Object.values(map)
                     .map(day => ({ ...day, income: day.salesRevenue + day.manualIncome, net: day.salesRevenue + day.manualIncome - day.expense }))
                     .sort((a, b) => b.date.localeCompare(a.date));
@@ -2211,30 +2292,34 @@
 
             const grandTotals = useMemo(() => {
                 const salesRevenue = salesSummary.revenue || 0;
-                const manual = cashbook.reduce((acc, entry) => {
-                    if (entry.type === 'income') acc.income += entry.amount;
-                    else acc.expense += entry.amount;
-                    return acc;
-                }, { income: 0, expense: 0 });
-                return { salesRevenue, manualIncome: manual.income, income: salesRevenue + manual.income, expense: manual.expense };
-            }, [salesSummary, cashbook]);
+                const manualIncome = cashbookSummary.income || 0;
+                return {
+                    salesRevenue,
+                    manualIncome,
+                    income: salesRevenue + manualIncome,
+                    expense: cashbookSummary.expense || 0,
+                };
+            }, [salesSummary, cashbookSummary]);
 
             const handleAddEntry = (e) => {
                 e.preventDefault();
                 const amt = parseFloat(amount);
                 if (!amt || amt <= 0 || !note.trim() || !entryDate) return;
+                const entry = { type, amount: amt, note: note.trim(), date: entryDate };
                 db.collection('cashbook').add({
-                    type, amount: amt, note: note.trim(), date: entryDate,
+                    ...entry,
                     createdAt: firebase.firestore.FieldValue.serverTimestamp(),
                 }).then(() => {
                     setNote('');
                     setAmount('');
                     showToast(type === 'income' ? 'บันทึกรายรับสำเร็จ' : 'บันทึกรายจ่ายสำเร็จ');
+                    return recordCashbook(entryDate, entry, 1);
                 }).catch(() => showToast('บันทึกไม่สำเร็จ', 'error'));
             };
 
             const handleDeleteEntry = (entry) => {
                 db.collection('cashbook').doc(entry.id).delete()
+                    .then(() => recordCashbook(entry.date, entry, -1))
                     .then(() => showToast('ลบรายการเรียบร้อยแล้ว'))
                     .catch(() => showToast('ลบไม่สำเร็จ', 'error'));
             };
