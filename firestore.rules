@@ -36,6 +36,26 @@ service cloud.firestore {
       allow write: if request.resource.data.keys().hasOnly(['count']) && request.resource.data.count is number;
     }
 
+    // Rolled-up takings: one small document per day (id "YYYY-MM-DD") and one running all-time
+    // total in summary/sales. The daily report reads these rather than every order ever placed,
+    // which is what keeps it correct and cheap as the months add up.
+    match /dailySales/{day} {
+      allow read: if true;
+      allow write: if request.resource.data.keys().hasOnly(['date', 'orderCount', 'cancelledCount', 'revenue', 'items'])
+        && request.resource.data.date is string
+        && request.resource.data.orderCount is number
+        && request.resource.data.revenue is number;
+      allow delete: if false;
+    }
+
+    match /summary/{docId} {
+      allow read: if true;
+      allow write: if request.resource.data.keys().hasOnly(['orderCount', 'revenue'])
+        && request.resource.data.orderCount is number
+        && request.resource.data.revenue is number;
+      allow delete: if false;
+    }
+
     // Membership records keyed by phone number (the document id). Written both by the customer
     // ordering page (auto drink-count tracking) and the staff POS (manual stamps/registration,
     // and edit/delete from the back-office member list). No login system exists yet, so writes

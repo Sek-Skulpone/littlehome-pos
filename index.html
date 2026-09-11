@@ -137,6 +137,13 @@
             return item.serveType ? `${item.name} (${serveLabel(item.serveType)})` : item.name;
         }
 
+        // A drink can cost more blended than iced, so the price follows the chosen option and
+        // falls back to the item's plain price when the shop hasn't set one.
+        function priceFor(item, serveType) {
+            const perType = item.servePrices && serveType ? item.servePrices[serveType] : null;
+            return typeof perType === 'number' ? perType : item.price;
+        }
+
         const playSound = (type) => {
             try {
                 const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -195,6 +202,28 @@
 
         function timeString(date) {
             return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+        }
+
+        function dateKey(date) {
+            return timeString(date).split(' ')[0];
+        }
+
+        // Keeps the shop's rolled-up takings in step with an order placed here. The back office
+        // reads these documents instead of scanning every order ever made.
+        function recordSale(dayKey, { orders = 0, cancelled = 0, revenue = 0 }) {
+            const inc = firebase.firestore.FieldValue.increment;
+            const batch = db.batch();
+            batch.set(db.collection('dailySales').doc(dayKey), {
+                date: dayKey,
+                orderCount: inc(orders),
+                cancelledCount: inc(cancelled),
+                revenue: inc(revenue),
+            }, { merge: true });
+            batch.set(db.collection('summary').doc('sales'), {
+                orderCount: inc(orders),
+                revenue: inc(revenue),
+            }, { merge: true });
+            return batch.commit();
         }
 
         // Best-effort membership tracking: the order itself already succeeded by the time this
@@ -309,7 +338,7 @@
                     .map(([key, qty]) => {
                         const [menuId, serveType] = key.split('|');
                         const item = menu.find(m => m.id === menuId);
-                        return item ? { key, menuId, name: item.name, price: item.price, qty, serveType } : null;
+                        return item ? { key, menuId, name: item.name, price: priceFor(item, serveType), qty, serveType } : null;
                     })
                     .filter(Boolean);
             }, [cart, menu]);
@@ -336,6 +365,7 @@
                 setSubmitting(true);
                 try {
                     const orderNumber = await getNextOrderNumber();
+                    const dayKey = dateKey(new Date());
                     const docRef = await db.collection('orders').add({
                         orderNumber,
                         items: cartItems.map(({ menuId, name, price, qty, serveType }) => (
@@ -348,11 +378,16 @@
                         phone: phone.replace(/\D/g, ''),
                         note: note.trim(),
                         status: 'new',
+                        dayKey,
                         createdAt: firebase.firestore.FieldValue.serverTimestamp(),
                         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
                     });
                     playSound('success');
                     lastReadyRef.current = null;
+
+                    // Best-effort like the membership update below: the order is already placed,
+                    // and the shop can rebuild a day's total from the orders if this ever misses.
+                    recordSale(dayKey, { orders: 1, revenue: cartTotal }).catch(() => {});
 
                     let memberTotalDrinks = null;
                     const cleanPhone = phone.replace(/\D/g, '');
@@ -516,7 +551,7 @@
                                             <div className="flex items-center justify-between">
                                                 <div className="min-w-0 pr-3">
                                                     <p className="font-semibold text-stone-800 text-sm truncate">{item.name}</p>
-                                                    <p className="text-xs text-amber-700 font-medium mt-0.5">{item.price} บาท</p>
+                                                    <p className="text-xs text-amber-700 font-medium mt-0.5">{priceFor(item, options[0])} บาท</p>
                                                     {options.length === 1 && (
                                                         <p className="text-[11px] text-stone-400 mt-0.5">มีแต่แบบ{serveLabel(options[0])}</p>
                                                     )}
@@ -541,7 +576,10 @@
                                                         const optQty = cart[key] || 0;
                                                         return (
                                                             <div key={t} className="flex items-center justify-between bg-stone-50 rounded-xl pl-3 pr-1.5 py-1.5">
-                                                                <span className="text-xs font-medium text-stone-600">{serveLabel(t)}</span>
+                                                                <span className="min-w-0 pr-2">
+                                                                    <span className="block text-xs font-medium text-stone-600">{serveLabel(t)}</span>
+                                                                    <span className="block text-[11px] text-amber-700 font-medium">{priceFor(item, t)} บาท</span>
+                                                                </span>
                                                                 {optQty === 0 ? (
                                                                     <button
                                                                         onClick={() => changeQty(key, 1)}

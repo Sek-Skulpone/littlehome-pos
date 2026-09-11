@@ -143,6 +143,61 @@
             return timeString(date).split(' ')[0];
         }
 
+        const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+
+        // "2026-09" reads as "ก.ย. 69" — Thai short month with the Buddhist-era year.
+        function monthLabel(month) {
+            const [year, index] = month.split('-');
+            return `${THAI_MONTHS[Number(index) - 1]} ${String(Number(year) + 543).slice(-2)}`;
+        }
+
+        // Sales totals live as one small document per day plus a running all-time doc. The
+        // report reads those instead of scanning the orders collection, so it stays correct
+        // and cheap however many thousands of orders pile up over the months. Each day also
+        // keeps a per-item tally, which is what makes "what sold today" answerable without
+        // re-reading the orders themselves.
+        // direction: +1 when a sale is rung up, -1 when one is voided.
+        function recordSale(dayKey, order, direction) {
+            const inc = firebase.firestore.FieldValue.increment;
+            const items = {};
+            (order.items || []).forEach(i => {
+                items[`${i.menuId}__${i.serveType || 'plain'}`] = {
+                    name: i.name,
+                    serveType: i.serveType || '',
+                    qty: inc(direction * i.qty),
+                    revenue: inc(direction * i.qty * i.price),
+                };
+            });
+            const batch = db.batch();
+            batch.set(db.collection('dailySales').doc(dayKey), {
+                date: dayKey,
+                orderCount: inc(direction),
+                cancelledCount: inc(direction < 0 ? 1 : 0),
+                revenue: inc(direction * (order.total || 0)),
+                items,
+            }, { merge: true });
+            batch.set(db.collection('summary').doc('sales'), {
+                orderCount: inc(direction),
+                revenue: inc(direction * (order.total || 0)),
+            }, { merge: true });
+            return batch.commit();
+        }
+
+        // A drink can cost more blended than iced, so the price follows the chosen option and
+        // falls back to the item's plain price when the shop hasn't set one.
+        function priceFor(item, serveType) {
+            const perType = item.servePrices && serveType ? item.servePrices[serveType] : null;
+            return typeof perType === 'number' ? perType : item.price;
+        }
+
+        // Which day's takings an order belongs to. Newer orders carry the key they were rung
+        // up on; older ones predate the field and fall back to their timestamp.
+        function orderDayKey(order) {
+            if (order.dayKey) return order.dayKey;
+            if (!order.createdAt) return dateKey(new Date());
+            return dateKey(order.createdAt.toDate ? order.createdAt.toDate() : new Date(order.createdAt));
+        }
+
         // Same daily counter the customer ordering page claims from, so walk-in and online
         // orders share one run of short order numbers per day.
         async function getNextOrderNumber() {
@@ -319,6 +374,8 @@
             const [orders, setOrders] = useState([]);
             const [menuItems, setMenuItems] = useState([]);
             const [cashbook, setCashbook] = useState([]);
+            const [dailySales, setDailySales] = useState([]);
+            const [salesSummary, setSalesSummary] = useState({ orderCount: 0, revenue: 0 });
             const seenOrderIds = useRef(null);
 
             useEffect(() => {
@@ -345,11 +402,28 @@
                 return unsub;
             }, []);
 
-            // Live orders feed; pings a sound when a genuinely new order arrives (not on first load).
-            // The window has to cover the daily report too, which totals sales from this same list,
-            // so it is wider than the order board alone would need.
+            // Rolled-up takings: a few months of day documents for the breakdown, plus one
+            // all-time doc for the headline figure. Both stay small no matter the order volume.
             useEffect(() => {
-                const unsub = db.collection('orders').orderBy('createdAt', 'desc').limit(500)
+                const unsub = db.collection('dailySales').orderBy('date', 'desc').limit(120)
+                    .onSnapshot((snap) => {
+                        setDailySales(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+                    });
+                return unsub;
+            }, []);
+
+            useEffect(() => {
+                const unsub = db.collection('summary').doc('sales').onSnapshot((doc) => {
+                    setSalesSummary(doc.exists ? doc.data() : { orderCount: 0, revenue: 0 });
+                });
+                return unsub;
+            }, []);
+
+            // Live orders feed; pings a sound when a genuinely new order arrives (not on first load).
+            // Only recent orders are needed: the board works on open ones and the report takes its
+            // totals from dailySales, so this window never has to grow with the shop's history.
+            useEffect(() => {
+                const unsub = db.collection('orders').orderBy('createdAt', 'desc').limit(200)
                     .onSnapshot((snap) => {
                         const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
                         if (seenOrderIds.current === null) {
@@ -546,9 +620,8 @@
                 }).catch(() => showToast('อัปเดตออเดอร์ไม่สำเร็จ', 'error'));
             };
 
-            // Cancelling voids the sale everywhere at once: the order drops out of the day's
-            // revenue (the report counts only non-cancelled orders) and any points it granted
-            // are taken back off the member's card.
+            // Cancelling voids the sale everywhere at once: the takings for that day drop by
+            // the order's total and any points it granted come back off the member's card.
             const confirmCancelOrder = () => {
                 const order = cancellingOrder;
                 setCancellingOrder(null);
@@ -557,8 +630,10 @@
                 db.collection('orders').doc(order.id).update({
                     status: 'cancelled',
                     updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-                }).then(() => reversePointsForOrder(order))
-                    .then(() => showToast(`ยกเลิกออเดอร์ #${order.orderNumber} แล้ว`))
+                }).then(() => Promise.all([
+                    recordSale(orderDayKey(order), order, -1),
+                    reversePointsForOrder(order),
+                ])).then(() => showToast(`ยกเลิกออเดอร์ #${order.orderNumber} แล้ว`))
                     .catch(() => showToast('ยกเลิกออเดอร์ไม่สำเร็จ', 'error'));
             };
 
@@ -650,7 +725,14 @@
                         )}
 
                         {activeTab === 'reports' && (
-                            <ReportsView orders={orders} cashbook={cashbook} showToast={showToast} onRequestCancel={setCancellingOrder} />
+                            <ReportsView
+                                orders={orders}
+                                cashbook={cashbook}
+                                dailySales={dailySales}
+                                salesSummary={salesSummary}
+                                showToast={showToast}
+                                onRequestCancel={setCancellingOrder}
+                            />
                         )}
 
                         {activeTab === 'menu' && (
@@ -983,7 +1065,7 @@
                 .map(([key, qty]) => {
                     const [menuId, serveType] = key.split('|');
                     const item = menuItems.find(m => m.id === menuId);
-                    return item ? { key, menuId, name: item.name, price: item.price, qty, serveType } : null;
+                    return item ? { key, menuId, name: item.name, price: priceFor(item, serveType), qty, serveType } : null;
                 })
                 .filter(Boolean), [cart, menuItems]);
 
@@ -1012,6 +1094,7 @@
                 try {
                     const orderNumber = await getNextOrderNumber();
                     const memberName = customerName.trim() || (member ? member.name : '');
+                    const dayKey = dateKey(new Date());
                     await db.collection('orders').add({
                         orderNumber,
                         items: cartItems.map(({ menuId, name, price, qty, serveType }) => (
@@ -1026,12 +1109,15 @@
                         status: 'new',
                         itemCount: totalQty,
                         pointsAwarded: cleanPhone ? totalQty : 0,
+                        dayKey,
                         createdAt: firebase.firestore.FieldValue.serverTimestamp(),
                         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
                     });
-                    // The order is already saved by this point, so a failure while stamping the
-                    // card must not report the sale as failed — that would invite staff to key
-                    // the whole order in a second time.
+                    // Both of these run after the order is safely saved, so neither may report
+                    // the sale as failed — that would invite staff to key the whole thing in
+                    // a second time.
+                    recordSale(dayKey, { items: cartItems, total }, 1)
+                        .catch(() => showToast('ออเดอร์บันทึกแล้ว แต่ยอดขายในรายงานไม่อัปเดต', 'error'));
                     if (cleanPhone) {
                         try {
                             await earnPointsForOrder(cleanPhone, memberName, totalQty, orderNumber);
@@ -1094,7 +1180,7 @@
                                                     }`}
                                                 >
                                                     <p className="font-semibold text-stone-800 text-sm leading-tight">{item.name}</p>
-                                                    <p className="text-xs text-amber-700 font-medium mt-1">{item.price} บาท</p>
+                                                    <p className="text-xs text-amber-700 font-medium mt-1">{priceFor(item, options[0])} บาท</p>
                                                     {options.length === 1 && (
                                                         <p className="text-[11px] text-stone-400 mt-1">มีแต่แบบ{serveLabel(options[0])}</p>
                                                     )}
@@ -1106,11 +1192,11 @@
                                                                     <button
                                                                         key={t}
                                                                         onClick={() => changeQty(cartKey(item.id, t), 1)}
-                                                                        className={`py-1.5 rounded-lg text-[11px] font-semibold transition-all active:scale-95 ${
+                                                                        className={`py-1.5 rounded-lg text-[11px] font-semibold leading-tight transition-all active:scale-95 ${
                                                                             optQty > 0 ? 'bg-amber-300 text-amber-950' : 'bg-stone-100 text-stone-600 hover:bg-amber-100'
                                                                         }`}
                                                                     >
-                                                                        {serveLabel(t)}{optQty > 0 ? ` ${optQty}` : ''}
+                                                                        {serveLabel(t)} {priceFor(item, t)}.-{optQty > 0 ? ` · ${optQty}` : ''}
                                                                     </button>
                                                                 );
                                                             })}
@@ -1307,6 +1393,14 @@
                     .catch(() => showToast('บันทึกตัวเลือกไม่สำเร็จ', 'error'));
             };
 
+            const updateServePrice = (item, key, value) => {
+                const price = parseFloat(value);
+                if (!(price >= 0) || price === priceFor(item, key)) return;
+                db.collection('menu').doc(item.id)
+                    .update({ [`servePrices.${key}`]: price })
+                    .catch(() => showToast('บันทึกราคาไม่สำเร็จ', 'error'));
+            };
+
             const toggleAvailable = (item) => {
                 db.collection('menu').doc(item.id).update({ available: !item.available }).catch(() => {});
             };
@@ -1406,19 +1500,29 @@
                                         {SERVE_TYPES.map(t => {
                                             const on = (item.serveTypes || []).includes(t.key);
                                             return (
-                                                <button
-                                                    key={t.key}
-                                                    onClick={() => toggleServeType(item, t.key)}
-                                                    className={`px-3 py-1 rounded-lg text-[11px] font-semibold transition-all ${
-                                                        on ? 'bg-amber-300 text-amber-950' : 'bg-stone-100 text-stone-500 hover:bg-amber-100'
-                                                    }`}
-                                                >
-                                                    {t.label}
-                                                </button>
+                                                <div key={t.key} className="flex items-center gap-1">
+                                                    <button
+                                                        onClick={() => toggleServeType(item, t.key)}
+                                                        className={`px-3 py-1 rounded-lg text-[11px] font-semibold transition-all ${
+                                                            on ? 'bg-amber-300 text-amber-950' : 'bg-stone-100 text-stone-500 hover:bg-amber-100'
+                                                        }`}
+                                                    >
+                                                        {t.label}
+                                                    </button>
+                                                    {on && (
+                                                        <input
+                                                            type="number" min="0" defaultValue={priceFor(item, t.key)}
+                                                            onBlur={(e) => updateServePrice(item, t.key, e.target.value)}
+                                                            className="w-16 bg-stone-100 rounded-lg px-2 py-1 text-[11px] text-right text-amber-800 font-semibold outline-none focus:ring-2 focus:ring-amber-500"
+                                                        />
+                                                    )}
+                                                </div>
                                             );
                                         })}
-                                        {(item.serveTypes || []).length === 0 && (
+                                        {(item.serveTypes || []).length === 0 ? (
                                             <span className="text-[11px] text-stone-300">ไม่ต้องเลือกตอนสั่ง</span>
+                                        ) : (
+                                            <span className="text-[11px] text-stone-300">ราคาต่อแบบ (บาท)</span>
                                         )}
                                     </div>
                                 </div>
@@ -2035,44 +2139,64 @@
             );
         }
 
-        function ReportsView({ orders, cashbook, showToast, onRequestCancel }) {
+        function ReportsView({ orders, cashbook, dailySales, salesSummary, showToast, onRequestCancel }) {
             const [type, setType] = useState('income');
             const [entryDate, setEntryDate] = useState(() => dateKey(new Date()));
             const [note, setNote] = useState('');
             const [amount, setAmount] = useState('');
 
-            const salesByDay = useMemo(() => {
+            const salesByDay = useMemo(() => dailySales.map(day => ({
+                date: day.date,
+                count: day.orderCount || 0,
+                revenue: day.revenue || 0,
+                cancelledCount: day.cancelledCount || 0,
+                items: Object.entries(day.items || {})
+                    .map(([key, item]) => ({ key, ...item }))
+                    .filter(item => item.qty > 0)
+                    .sort((a, b) => b.qty - a.qty),
+            })).sort((a, b) => b.date.localeCompare(a.date)), [dailySales]);
+
+            // Months are rolled up from the same day documents, so nothing extra is stored and
+            // the comparison covers however much history the day window holds.
+            const salesByMonth = useMemo(() => {
                 const map = {};
-                orders.forEach(order => {
-                    if (!order.createdAt) return;
-                    const date = order.createdAt.toDate ? order.createdAt.toDate() : new Date(order.createdAt);
-                    const key = dateKey(date);
-                    if (!map[key]) map[key] = { date: key, count: 0, revenue: 0, cancelledCount: 0 };
-                    if (order.status === 'cancelled') {
-                        map[key].cancelledCount += 1;
-                    } else {
-                        map[key].count += 1;
-                        map[key].revenue += order.total || 0;
-                    }
+                dailySales.forEach(day => {
+                    const month = (day.date || '').slice(0, 7);
+                    if (!month) return;
+                    if (!map[month]) map[month] = { month, orderCount: 0, revenue: 0 };
+                    map[month].orderCount += day.orderCount || 0;
+                    map[month].revenue += day.revenue || 0;
                 });
-                return Object.values(map).sort((a, b) => b.date.localeCompare(a.date));
-            }, [orders]);
+                const ascending = Object.values(map).sort((a, b) => a.month.localeCompare(b.month));
+                return ascending
+                    .map((month, index) => {
+                        const previous = index > 0 ? ascending[index - 1].revenue : null;
+                        return {
+                            ...month,
+                            change: previous ? Math.round(((month.revenue - previous) / previous) * 100) : null,
+                        };
+                    })
+                    .reverse();
+            }, [dailySales]);
+
+            const chartMonths = useMemo(() => salesByMonth.slice(0, 6).reverse(), [salesByMonth]);
+            const maxMonthRevenue = Math.max(1, ...chartMonths.map(month => month.revenue));
 
             // Income is sales revenue plus any manually-logged income (e.g. cash income outside
             // the ordering flow); expense is manual only since nothing else in the app spends money.
-            // Sales are listed order by order so a wrong sale can be voided from the report itself.
+            // A day's takings come from its rolled-up total, while the individual sale lines are
+            // drawn from the recent orders still in memory — so older days show the figure without
+            // the itemised rows rather than a figure that quietly shrinks as orders age out.
             const ledgerByDay = useMemo(() => {
                 const map = {};
                 const dayOf = (date) => {
                     if (!map[date]) map[date] = { date, salesRevenue: 0, manualIncome: 0, expense: 0, orders: [], entries: [] };
                     return map[date];
                 };
+                dailySales.forEach(day => { dayOf(day.date).salesRevenue = day.revenue || 0; });
                 orders.forEach(order => {
-                    if (!order.createdAt || order.status === 'cancelled') return;
-                    const date = order.createdAt.toDate ? order.createdAt.toDate() : new Date(order.createdAt);
-                    const day = dayOf(dateKey(date));
-                    day.salesRevenue += order.total || 0;
-                    day.orders.push(order);
+                    if (order.status === 'cancelled') return;
+                    dayOf(orderDayKey(order)).orders.push(order);
                 });
                 cashbook.forEach(entry => {
                     const day = dayOf(entry.date);
@@ -2083,17 +2207,17 @@
                 return Object.values(map)
                     .map(day => ({ ...day, income: day.salesRevenue + day.manualIncome, net: day.salesRevenue + day.manualIncome - day.expense }))
                     .sort((a, b) => b.date.localeCompare(a.date));
-            }, [orders, cashbook]);
+            }, [dailySales, orders, cashbook]);
 
             const grandTotals = useMemo(() => {
-                const salesRevenue = salesByDay.reduce((sum, day) => sum + day.revenue, 0);
+                const salesRevenue = salesSummary.revenue || 0;
                 const manual = cashbook.reduce((acc, entry) => {
                     if (entry.type === 'income') acc.income += entry.amount;
                     else acc.expense += entry.amount;
                     return acc;
                 }, { income: 0, expense: 0 });
                 return { salesRevenue, manualIncome: manual.income, income: salesRevenue + manual.income, expense: manual.expense };
-            }, [salesByDay, cashbook]);
+            }, [salesSummary, cashbook]);
 
             const handleAddEntry = (e) => {
                 e.preventDefault();
@@ -2122,6 +2246,63 @@
                         <p className="text-xs text-stone-400 mt-0.5">สรุปยอดขายและรายรับ-รายจ่ายของร้าน</p>
                     </div>
 
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100 space-y-4">
+                        <h3 className="font-bold text-stone-800 text-sm uppercase tracking-wider text-stone-500">สรุปรายเดือน</h3>
+                        {salesByMonth.length === 0 ? (
+                            <p className="text-sm text-stone-400 text-center py-6">ยังไม่มียอดขาย</p>
+                        ) : (
+                            <React.Fragment>
+                                <div>
+                                    <div className="h-40 flex items-end justify-center gap-3">
+                                        {chartMonths.map(month => (
+                                            <div key={month.month} className="flex-1 max-w-[72px] h-full flex flex-col justify-end items-center gap-1 min-w-0">
+                                                <span className="text-[10px] text-stone-500 whitespace-nowrap">{month.revenue.toLocaleString()}</span>
+                                                <div
+                                                    className="w-full bg-amber-300 rounded-t-lg"
+                                                    style={{ height: `${Math.max(3, (month.revenue / maxMonthRevenue) * 100)}%` }}
+                                                ></div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div className="flex justify-center gap-3 mt-1.5">
+                                        {chartMonths.map(month => (
+                                            <span key={month.month} className="flex-1 max-w-[72px] text-center text-[10px] text-stone-400 truncate">
+                                                {monthLabel(month.month)}
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-sm">
+                                        <thead>
+                                            <tr className="text-[11px] uppercase tracking-wider text-stone-400 text-left">
+                                                <th className="font-semibold pb-2">เดือน</th>
+                                                <th className="font-semibold pb-2 text-right">ออเดอร์</th>
+                                                <th className="font-semibold pb-2 text-right">ยอดขาย</th>
+                                                <th className="font-semibold pb-2 text-right">เทียบเดือนก่อน</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-stone-100">
+                                            {salesByMonth.map(month => (
+                                                <tr key={month.month}>
+                                                    <td className="py-2 font-semibold text-stone-700">{monthLabel(month.month)}</td>
+                                                    <td className="py-2 text-right text-stone-500">{month.orderCount.toLocaleString()}</td>
+                                                    <td className="py-2 text-right font-bold text-amber-700">{month.revenue.toLocaleString()}</td>
+                                                    <td className={`py-2 text-right font-semibold ${
+                                                        month.change === null ? 'text-stone-300' : month.change >= 0 ? 'text-emerald-600' : 'text-red-500'
+                                                    }`}>
+                                                        {month.change === null ? '-' : `${month.change >= 0 ? '+' : ''}${month.change}%`}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </React.Fragment>
+                        )}
+                    </div>
+
                     <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100 space-y-2">
                         <h3 className="font-bold text-stone-800 mb-2 text-sm uppercase tracking-wider text-stone-500">สรุปยอดขายรายวัน</h3>
                         {salesByDay.length === 0 ? (
@@ -2129,14 +2310,27 @@
                         ) : (
                             <div className="divide-y divide-stone-100">
                                 {salesByDay.map(day => (
-                                    <div key={day.date} className="py-3 flex items-center justify-between">
-                                        <div>
-                                            <p className="font-semibold text-stone-700 text-sm">{day.date}</p>
-                                            <p className="text-xs text-stone-400">
-                                                {day.count} ออเดอร์{day.cancelledCount > 0 ? ` · ยกเลิก ${day.cancelledCount}` : ''}
-                                            </p>
+                                    <div key={day.date} className="py-3 space-y-2">
+                                        <div className="flex items-center justify-between">
+                                            <div>
+                                                <p className="font-semibold text-stone-700 text-sm">{day.date}</p>
+                                                <p className="text-xs text-stone-400">
+                                                    {day.count} ออเดอร์{day.cancelledCount > 0 ? ` · ยกเลิก ${day.cancelledCount}` : ''}
+                                                </p>
+                                            </div>
+                                            <span className="font-bold text-amber-700">{day.revenue.toLocaleString()} บาท</span>
                                         </div>
-                                        <span className="font-bold text-amber-700">{day.revenue.toLocaleString()} บาท</span>
+                                        {day.items.length > 0 && (
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {day.items.map(item => (
+                                                    <span key={item.key} className="bg-stone-50 border border-stone-100 rounded-lg px-2 py-1 text-[11px] text-stone-600">
+                                                        {item.name}{item.serveType ? ` (${serveLabel(item.serveType)})` : ''}
+                                                        <span className="font-bold text-stone-800"> ×{item.qty}</span>
+                                                        <span className="text-stone-400"> · {item.revenue.toLocaleString()}฿</span>
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        )}
                                     </div>
                                 ))}
                             </div>
