@@ -191,6 +191,83 @@
                 .catch(() => null);
         }
 
+        // Members matching what has been typed so far, from the very first character. Anyone
+        // among the recently-active members held in memory matches anywhere in their name or
+        // number, instantly; a prefix query then fills in older members, who aren't loaded.
+        function useMemberSearch(query, customers, limit = 8) {
+            const term = query.trim();
+            const isPhone = term.length > 0 && /^[\d\s-]+$/.test(term);
+            const needle = isPhone ? term.replace(/\D/g, '') : term.toLowerCase();
+            // Remote results remember which search they answer, so the previous keystroke's
+            // matches never show under the new text while its own query is still on the way.
+            const [remote, setRemote] = useState({ needle: '', list: [] });
+
+            const local = useMemo(() => {
+                if (!needle) return [];
+                return customers.filter(c => (isPhone
+                    ? (c.phone || '').includes(needle)
+                    : (c.name || '').toLowerCase().includes(needle)));
+            }, [needle, isPhone, customers]);
+
+            useEffect(() => {
+                if (!needle) return;
+                let cancelled = false;
+                // Waits for a pause in typing so a quick name doesn't cost a read per letter.
+                const timer = setTimeout(() => {
+                    const field = isPhone ? 'phone' : 'name';
+                    const value = isPhone ? needle : term;
+                    db.collection('customers')
+                        .where(field, '>=', value)
+                        .where(field, '<', value + '')
+                        .limit(limit)
+                        .get()
+                        .then(snap => {
+                            if (!cancelled) setRemote({ needle, list: snap.docs.map(d => ({ id: d.id, ...d.data() })) });
+                        })
+                        .catch(() => { if (!cancelled) setRemote({ needle, list: [] }); });
+                }, 250);
+                return () => {
+                    cancelled = true;
+                    clearTimeout(timer);
+                };
+            }, [needle, isPhone, term, limit]);
+
+            return useMemo(() => {
+                const fresh = needle && remote.needle === needle ? remote.list : [];
+                const seen = new Set();
+                return [...local, ...fresh]
+                    .filter(c => (seen.has(c.id) ? false : seen.add(c.id)))
+                    .slice(0, limit);
+            }, [local, remote, needle, limit]);
+        }
+
+        function MemberSuggestions({ members, onPick, formatPhone }) {
+            if (members.length === 0) return null;
+            return (
+                <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden divide-y divide-stone-100">
+                    {members.map(m => (
+                        <button
+                            key={m.id}
+                            type="button"
+                            onClick={() => onPick(m)}
+                            className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-left hover:bg-amber-50 active:bg-amber-100 transition-colors"
+                        >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-8 h-8 rounded-lg bg-sky-100 text-sky-900 text-xs font-bold flex items-center justify-center shrink-0">
+                                    {memberLabel(m).slice(0, 2)}
+                                </div>
+                                <div className="min-w-0">
+                                    <p className="text-sm font-semibold text-stone-800 truncate">{memberLabel(m)}</p>
+                                    <p className="text-[11px] text-stone-400">{formatPhone(m.phone)}</p>
+                                </div>
+                            </div>
+                            <span className="text-xs font-bold text-amber-700 shrink-0">{m.points || 0} แต้ม</span>
+                        </button>
+                    ))}
+                </div>
+            );
+        }
+
         // Manually-logged income and expense roll up the same way as sales, into the day's
         // document and a running total, so the headline figures stay right once the cashbook
         // has more entries than any one screen would load.
@@ -759,6 +836,7 @@
                                 setShowRedeemModal={setShowRedeemModal}
                                 formatPhone={formatPhone}
                                 maxStampsPerCard={maxStampsPerCard}
+                                customers={customers}
                             />
                         )}
 
@@ -1143,6 +1221,38 @@
                 return () => { cancelled = true; };
             }, [cleanPhone]);
 
+            // The member box takes a name or a number. A number is also the phone the sale is
+            // recorded against, so a new customer can still be signed up by typing theirs in
+            // full; a name only identifies someone once they're picked from the matches.
+            const [memberQuery, setMemberQuery] = useState('');
+            const queryIsPhone = memberQuery.length > 0 && /^\d+$/.test(memberQuery);
+            const suggestions = useMemberSearch(memberQuery, customers);
+            // Staff often start with the customer's name instead, so that box offers members too.
+            const nameSuggestions = useMemberSearch(customerName, customers);
+
+            // The name that picking a member filled in, so it can be taken back if the member
+            // box moves on — otherwise the order would still carry a name nobody is linked to.
+            const [pickedName, setPickedName] = useState('');
+
+            const changeMemberQuery = (value) => {
+                const isPhone = /^[\d\s-]*$/.test(value);
+                const next = isPhone ? value.replace(/\D/g, '').slice(0, 10) : value;
+                setMemberQuery(next);
+                setPhone(isPhone ? next : '');
+                if (pickedName && customerName === pickedName) setCustomerName('');
+                setPickedName('');
+            };
+
+            const pickMember = (picked) => {
+                playSound('tap');
+                // Shown straight away; the lookup that follows only refreshes it.
+                setMember(picked);
+                setMemberQuery(picked.phone);
+                setPhone(picked.phone);
+                setCustomerName(picked.name || '');
+                setPickedName(picked.name || '');
+            };
+
             const changeQty = (key, delta) => {
                 playSound('tap');
                 setCart(prev => ({ ...prev, [key]: Math.max(0, (prev[key] || 0) + delta) }));
@@ -1200,7 +1310,7 @@
                     setCart({});
                     setTableNumber('');
                     setCustomerName('');
-                    setPhone('');
+                    changeMemberQuery('');
                     setNote('');
                 } catch (e) {
                     showToast('บันทึกออเดอร์ไม่สำเร็จ', 'error');
@@ -1339,12 +1449,30 @@
                             )}
 
                             <div>
-                                <label className="block text-xs font-semibold text-stone-500 uppercase tracking-wider mb-1.5">เบอร์สมาชิก (ถ้ามี)</label>
-                                <input
-                                    type="tel" value={formatPhone(phone)} onChange={e => setPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
-                                    placeholder="08X-XXX-XXXX"
-                                    className="w-full bg-stone-100 border-none rounded-2xl px-4 py-3 text-base font-semibold text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
-                                />
+                                <label className="block text-xs font-semibold text-stone-500 uppercase tracking-wider mb-1.5">สมาชิก (ถ้ามี)</label>
+                                <div className="relative">
+                                    <input
+                                        type="text"
+                                        value={queryIsPhone ? formatPhone(memberQuery) : memberQuery}
+                                        onChange={e => changeMemberQuery(e.target.value)}
+                                        placeholder="พิมพ์ชื่อหรือเบอร์โทร"
+                                        className="w-full bg-stone-100 border-none rounded-2xl pl-4 pr-11 py-3 text-base font-semibold text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                                    />
+                                    {memberQuery && (
+                                        <button
+                                            type="button"
+                                            onClick={() => changeMemberQuery('')}
+                                            className="absolute right-2.5 top-1/2 -translate-y-1/2 w-7 h-7 rounded-full bg-stone-200 text-stone-600 flex items-center justify-center hover:bg-stone-300"
+                                        >
+                                            <Icon name="x" className="w-4 h-4"></Icon>
+                                        </button>
+                                    )}
+                                </div>
+                                {!member && (
+                                    <div className="mt-2">
+                                        <MemberSuggestions members={suggestions} onPick={pickMember} formatPhone={formatPhone} />
+                                    </div>
+                                )}
                                 {member ? (
                                     <div className="mt-2 bg-sky-50 border border-sky-200 rounded-2xl p-3 space-y-2">
                                         <div className="flex items-center justify-between gap-2">
@@ -1384,10 +1512,17 @@
                                 ) : null}
                             </div>
 
-                            <input
-                                type="text" value={customerName} onChange={e => setCustomerName(e.target.value)} placeholder="ชื่อลูกค้า (ถ้ามี)"
-                                className="w-full bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
-                            />
+                            <div>
+                                <input
+                                    type="text" value={customerName} onChange={e => setCustomerName(e.target.value)} placeholder="ชื่อลูกค้า (ถ้ามี)"
+                                    className="w-full bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
+                                />
+                                {!member && !memberQuery && (
+                                    <div className="mt-2">
+                                        <MemberSuggestions members={nameSuggestions} onPick={pickMember} formatPhone={formatPhone} />
+                                    </div>
+                                )}
+                            </div>
 
                             <input
                                 type="text" value={note} onChange={e => setNote(e.target.value)} placeholder="หมายเหตุ เช่น หวานน้อย"
@@ -1611,8 +1746,16 @@
         function POSView({
             phoneInput, setPhoneInput, handleNumpad, handleSearchCustomer,
             selectedCustomer, setSelectedPhone, handleAddPoints, handleCompleteCard, handleUseFreeDrink,
-            setShowNewCustomerModal, setShowRedeemModal, formatPhone, maxStampsPerCard
+            setShowNewCustomerModal, setShowRedeemModal, formatPhone, maxStampsPerCard, customers
         }) {
+            const matches = useMemberSearch(phoneInput, customers);
+
+            const pickMember = (picked) => {
+                playSound('tap');
+                setPhoneInput(picked.phone);
+                setSelectedPhone(picked.phone);
+            };
+
             return (
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 max-w-7xl mx-auto h-full">
 
@@ -1848,6 +1991,13 @@
                                 <CustomerOrderHistory phone={selectedCustomer.phone} />
 
                             </div>
+                        ) : phoneInput && matches.length > 0 ? (
+                            <div className="bg-white rounded-3xl p-5 shadow-sm border border-stone-100 space-y-3 h-full">
+                                <p className="text-xs font-bold uppercase tracking-wider text-stone-400">
+                                    สมาชิกที่ตรงกับ "{formatPhone(phoneInput)}"
+                                </p>
+                                <MemberSuggestions members={matches} onPick={pickMember} formatPhone={formatPhone} />
+                            </div>
                         ) : (
                             <div className="bg-white rounded-3xl p-12 shadow-sm border border-stone-100 flex flex-col items-center justify-center text-center h-full space-y-4">
                                 <div className="w-20 h-20 bg-stone-100 rounded-3xl flex items-center justify-center text-stone-400">
@@ -1915,26 +2065,10 @@
             const [searchTerm, setSearchTerm] = useState('');
             const [editingCustomer, setEditingCustomer] = useState(null);
             const [deletingCustomer, setDeletingCustomer] = useState(null);
-            const [phoneMatch, setPhoneMatch] = useState(null);
-            const filtered = customers.filter(c =>
-                c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                c.phone.includes(searchTerm)
-            );
-
-            // The list holds recently-active members, so a search for a phone number that isn't
-            // among them falls back to fetching that member directly.
-            const searchedPhone = searchTerm.replace(/\D/g, '');
-            useEffect(() => {
-                if (searchedPhone.length < 9 || filtered.length > 0) {
-                    setPhoneMatch(null);
-                    return;
-                }
-                let cancelled = false;
-                lookupCustomer(searchedPhone).then(found => { if (!cancelled) setPhoneMatch(found); });
-                return () => { cancelled = true; };
-            }, [searchedPhone, filtered.length]);
-
-            const shown = filtered.length > 0 ? filtered : (phoneMatch ? [phoneMatch] : []);
+            // Same matcher as the order screens, so a search here also reaches members older
+            // than the recently-active ones this list holds.
+            const matches = useMemberSearch(searchTerm, customers, 50);
+            const shown = searchTerm.trim() ? matches : customers;
 
             const handleUpdateCustomer = async (customer, { name, phone, points }) => {
                 const cleanPhone = phone.replace(/\D/g, '');
