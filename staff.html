@@ -145,6 +145,19 @@
 
         const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
 
+        // Cups sold in a day's rolled-up record — every item line counts, the same way a
+        // member's "สั่งไปแล้ว N แก้ว" is counted.
+        function cupsIn(day) {
+            return Object.values(day.items || {}).reduce((sum, item) => sum + Math.max(0, item.qty || 0), 0);
+        }
+
+        const BEST_SELLER_PERIODS = [
+            { days: 1, label: 'วันนี้' },
+            { days: 7, label: '7 วัน' },
+            { days: 30, label: '30 วัน' },
+            { days: 90, label: '90 วัน' },
+        ];
+
         // "2026-09" reads as "ก.ย. 69" — Thai short month with the Buddhist-era year.
         function monthLabel(month) {
             const [year, index] = month.split('-');
@@ -2367,16 +2380,20 @@
             const [note, setNote] = useState('');
             const [amount, setAmount] = useState('');
 
-            const salesByDay = useMemo(() => dailySales.map(day => ({
-                date: day.date,
-                count: day.orderCount || 0,
-                revenue: day.revenue || 0,
-                cancelledCount: day.cancelledCount || 0,
-                items: Object.entries(day.items || {})
+            const salesByDay = useMemo(() => dailySales.map(day => {
+                const items = Object.entries(day.items || {})
                     .map(([key, item]) => ({ key, ...item }))
                     .filter(item => item.qty > 0)
-                    .sort((a, b) => b.qty - a.qty),
-            })).sort((a, b) => b.date.localeCompare(a.date)), [dailySales]);
+                    .sort((a, b) => b.qty - a.qty);
+                return {
+                    date: day.date,
+                    count: day.orderCount || 0,
+                    revenue: day.revenue || 0,
+                    cancelledCount: day.cancelledCount || 0,
+                    cups: cupsIn(day),
+                    items,
+                };
+            }).sort((a, b) => b.date.localeCompare(a.date)), [dailySales]);
 
             // Months are rolled up from the same day documents, so nothing extra is stored and
             // the comparison covers however much history the day window holds.
@@ -2385,8 +2402,9 @@
                 dailySales.forEach(day => {
                     const month = (day.date || '').slice(0, 7);
                     if (!month) return;
-                    if (!map[month]) map[month] = { month, orderCount: 0, revenue: 0 };
+                    if (!map[month]) map[month] = { month, orderCount: 0, cups: 0, revenue: 0 };
                     map[month].orderCount += day.orderCount || 0;
+                    map[month].cups += cupsIn(day);
                     map[month].revenue += day.revenue || 0;
                 });
                 const ascending = Object.values(map).sort((a, b) => a.month.localeCompare(b.month));
@@ -2403,6 +2421,33 @@
 
             const chartMonths = useMemo(() => salesByMonth.slice(0, 6).reverse(), [salesByMonth]);
             const maxMonthRevenue = Math.max(1, ...chartMonths.map(month => month.revenue));
+
+            // Best sellers are ranked by cups over the chosen stretch of days, read from the same
+            // per-day tallies. Iced and blended of one drink count together, with the split shown,
+            // since "what sells" is a question about the drink.
+            const [bestPeriod, setBestPeriod] = useState(7);
+            const bestSellers = useMemo(() => {
+                const start = new Date();
+                start.setDate(start.getDate() - (bestPeriod - 1));
+                const cutoff = dateKey(start);
+                const map = {};
+                dailySales.forEach(day => {
+                    if (!day.date || day.date < cutoff) return;
+                    Object.values(day.items || {}).forEach(item => {
+                        if (!(item.qty > 0)) return;
+                        if (!map[item.name]) map[item.name] = { name: item.name, qty: 0, revenue: 0, byServe: {} };
+                        const entry = map[item.name];
+                        entry.qty += item.qty;
+                        entry.revenue += item.revenue || 0;
+                        if (item.serveType) entry.byServe[item.serveType] = (entry.byServe[item.serveType] || 0) + item.qty;
+                    });
+                });
+                return Object.values(map).sort((a, b) => b.qty - a.qty || b.revenue - a.revenue);
+            }, [dailySales, bestPeriod]);
+            const bestTotals = bestSellers.reduce(
+                (acc, item) => ({ qty: acc.qty + item.qty, revenue: acc.revenue + item.revenue }),
+                { qty: 0, revenue: 0 },
+            );
 
             // Income is sales revenue plus any manually-logged income (e.g. cash income outside
             // the ordering flow); expense is manual only since nothing else in the app spends money.
@@ -2505,6 +2550,7 @@
                                             <tr className="text-[11px] uppercase tracking-wider text-stone-400 text-left">
                                                 <th className="font-semibold pb-2">เดือน</th>
                                                 <th className="font-semibold pb-2 text-right">ออเดอร์</th>
+                                                <th className="font-semibold pb-2 text-right">แก้ว</th>
                                                 <th className="font-semibold pb-2 text-right">ยอดขาย</th>
                                                 <th className="font-semibold pb-2 text-right">เทียบเดือนก่อน</th>
                                             </tr>
@@ -2514,6 +2560,7 @@
                                                 <tr key={month.month}>
                                                     <td className="py-2 font-semibold text-stone-700">{monthLabel(month.month)}</td>
                                                     <td className="py-2 text-right text-stone-500">{month.orderCount.toLocaleString()}</td>
+                                                    <td className="py-2 text-right text-stone-600 font-semibold">{month.cups.toLocaleString()}</td>
                                                     <td className="py-2 text-right font-bold text-amber-700">{month.revenue.toLocaleString()}</td>
                                                     <td className={`py-2 text-right font-semibold ${
                                                         month.change === null ? 'text-stone-300' : month.change >= 0 ? 'text-emerald-600' : 'text-red-500'
@@ -2525,6 +2572,81 @@
                                         </tbody>
                                     </table>
                                 </div>
+                            </React.Fragment>
+                        )}
+                    </div>
+
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100 space-y-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                            <h3 className="font-bold text-sm uppercase tracking-wider text-stone-500">เมนูขายดี</h3>
+                            <div className="flex gap-1 bg-stone-100 rounded-xl p-1">
+                                {BEST_SELLER_PERIODS.map(period => (
+                                    <button
+                                        key={period.days}
+                                        onClick={() => setBestPeriod(period.days)}
+                                        className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+                                            bestPeriod === period.days ? 'bg-white text-stone-800 shadow-sm' : 'text-stone-500 hover:text-stone-700'
+                                        }`}
+                                    >
+                                        {period.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        {bestSellers.length === 0 ? (
+                            <p className="text-sm text-stone-400 text-center py-6">ยังไม่มียอดขายในช่วงนี้</p>
+                        ) : (
+                            <React.Fragment>
+                                <div className="grid grid-cols-3 gap-3">
+                                    <div className="bg-amber-50 rounded-2xl p-3">
+                                        <p className="text-[11px] text-stone-500">ขายไปทั้งหมด</p>
+                                        <p className="text-lg font-extrabold text-amber-800">{bestTotals.qty.toLocaleString()} <span className="text-xs font-normal">แก้ว</span></p>
+                                    </div>
+                                    <div className="bg-amber-50 rounded-2xl p-3">
+                                        <p className="text-[11px] text-stone-500">ยอดขาย</p>
+                                        <p className="text-lg font-extrabold text-amber-800">{bestTotals.revenue.toLocaleString()} <span className="text-xs font-normal">บาท</span></p>
+                                    </div>
+                                    <div className="bg-sky-50 rounded-2xl p-3 min-w-0">
+                                        <p className="text-[11px] text-stone-500">ขายดีที่สุด</p>
+                                        <p className="text-sm font-extrabold text-sky-900 truncate">{bestSellers[0].name}</p>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-3">
+                                    {bestSellers.slice(0, 10).map((item, index) => (
+                                        <div key={item.name} className="space-y-1">
+                                            <div className="flex items-center justify-between gap-3 text-sm">
+                                                <div className="flex items-center gap-2 min-w-0">
+                                                    <span className={`w-6 h-6 rounded-lg text-xs font-bold flex items-center justify-center shrink-0 ${
+                                                        index < 3 ? 'bg-amber-300 text-amber-950' : 'bg-stone-100 text-stone-500'
+                                                    }`}>
+                                                        {index + 1}
+                                                    </span>
+                                                    <span className="font-semibold text-stone-800 truncate">{item.name}</span>
+                                                    {Object.keys(item.byServe).length > 0 && (
+                                                        <span className="text-[11px] text-stone-400 shrink-0">
+                                                            {SERVE_TYPES.filter(t => item.byServe[t.key]).map(t => `${t.label} ${item.byServe[t.key]}`).join(' · ')}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <div className="text-right shrink-0">
+                                                    <span className="font-bold text-stone-800">{item.qty}</span>
+                                                    <span className="text-xs text-stone-400"> แก้ว · {item.revenue.toLocaleString()}฿</span>
+                                                </div>
+                                            </div>
+                                            <div className="h-1.5 bg-stone-100 rounded-full overflow-hidden ml-8">
+                                                <div
+                                                    className={`h-full rounded-full ${index < 3 ? 'bg-amber-300' : 'bg-stone-300'}`}
+                                                    style={{ width: `${(item.qty / bestSellers[0].qty) * 100}%` }}
+                                                ></div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                                {bestSellers.length > 10 && (
+                                    <p className="text-[11px] text-stone-400 text-center">แสดง 10 อันดับแรกจาก {bestSellers.length} เมนู</p>
+                                )}
                             </React.Fragment>
                         )}
                     </div>
@@ -2541,7 +2663,7 @@
                                             <div>
                                                 <p className="font-semibold text-stone-700 text-sm">{day.date}</p>
                                                 <p className="text-xs text-stone-400">
-                                                    {day.count} ออเดอร์{day.cancelledCount > 0 ? ` · ยกเลิก ${day.cancelledCount}` : ''}
+                                                    {day.count} ออเดอร์ · <span className="font-semibold text-stone-600">{day.cups.toLocaleString()} แก้ว</span>{day.cancelledCount > 0 ? ` · ยกเลิก ${day.cancelledCount}` : ''}
                                                 </p>
                                             </div>
                                             <span className="font-bold text-amber-700">{day.revenue.toLocaleString()} บาท</span>
