@@ -210,20 +210,40 @@
 
         // Keeps the shop's rolled-up takings in step with an order placed here. The back office
         // reads these documents instead of scanning every order ever made.
-        function recordSale(dayKey, { orders = 0, cancelled = 0, revenue = 0 }) {
+        // Must write the same per-item tally as the back office's copy: a sale that skipped it
+        // would be missing from "what sold", and cancelling it there would drive the tally below
+        // zero.
+        function recordSale(dayKey, order, direction) {
             const inc = firebase.firestore.FieldValue.increment;
+            const items = {};
+            (order.items || []).forEach(i => {
+                items[`${i.menuId}__${i.serveType || 'plain'}`] = {
+                    name: i.name,
+                    serveType: i.serveType || '',
+                    qty: inc(direction * i.qty),
+                    revenue: inc(direction * i.qty * i.price),
+                    ...(i.addon ? { addon: true } : {}),
+                };
+            });
             const batch = db.batch();
             batch.set(db.collection('dailySales').doc(dayKey), {
                 date: dayKey,
-                orderCount: inc(orders),
-                cancelledCount: inc(cancelled),
-                revenue: inc(revenue),
+                orderCount: inc(direction),
+                cancelledCount: inc(direction < 0 ? 1 : 0),
+                revenue: inc(direction * (order.total || 0)),
+                items,
             }, { merge: true });
             batch.set(db.collection('summary').doc('sales'), {
-                orderCount: inc(orders),
-                revenue: inc(revenue),
+                orderCount: inc(direction),
+                revenue: inc(direction * (order.total || 0)),
             }, { merge: true });
             return batch.commit();
+        }
+
+        // Extras such as an added shot aren't a drink of their own, so they don't count as a
+        // cup towards a member's "สั่งไปแล้ว N แก้ว".
+        function cupCount(lines) {
+            return (lines || []).reduce((sum, line) => sum + (line.addon ? 0 : (line.qty || 0)), 0);
         }
 
         // Best-effort membership tracking: the order itself already succeeded by the time this
@@ -338,7 +358,10 @@
                     .map(([key, qty]) => {
                         const [menuId, serveType] = key.split('|');
                         const item = menu.find(m => m.id === menuId);
-                        return item ? { key, menuId, name: item.name, price: priceFor(item, serveType), qty, serveType } : null;
+                        return item ? {
+                            key, menuId, name: item.name, price: priceFor(item, serveType), qty, serveType,
+                            addon: item.addon === true,
+                        } : null;
                     })
                     .filter(Boolean);
             }, [cart, menu]);
@@ -368,9 +391,11 @@
                     const dayKey = dateKey(new Date());
                     const docRef = await db.collection('orders').add({
                         orderNumber,
-                        items: cartItems.map(({ menuId, name, price, qty, serveType }) => (
-                            serveType ? { menuId, name, price, qty, serveType } : { menuId, name, price, qty }
-                        )),
+                        items: cartItems.map(({ menuId, name, price, qty, serveType, addon }) => ({
+                            menuId, name, price, qty,
+                            ...(serveType ? { serveType } : {}),
+                            ...(addon ? { addon: true } : {}),
+                        })),
                         total: cartTotal,
                         orderType,
                         tableNumber: orderType === 'dine-in' ? tableNumber.trim() : '',
@@ -387,13 +412,13 @@
 
                     // Best-effort like the membership update below: the order is already placed,
                     // and the shop can rebuild a day's total from the orders if this ever misses.
-                    recordSale(dayKey, { orders: 1, revenue: cartTotal }).catch(() => {});
+                    recordSale(dayKey, { items: cartItems, total: cartTotal }, 1).catch(() => {});
 
                     let memberTotalDrinks = null;
                     const cleanPhone = phone.replace(/\D/g, '');
                     if (cleanPhone) {
                         try {
-                            const summary = await upsertCustomerAfterOrder(cleanPhone, customerName.trim(), cartItems.reduce((s, i) => s + i.qty, 0));
+                            const summary = await upsertCustomerAfterOrder(cleanPhone, customerName.trim(), cupCount(cartItems));
                             memberTotalDrinks = summary.totalDrinks;
                         } catch (e) { /* membership tracking is best-effort; the order already succeeded */ }
                     }

@@ -145,10 +145,24 @@
 
         const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
 
-        // Cups sold in a day's rolled-up record — every item line counts, the same way a
-        // member's "สั่งไปแล้ว N แก้ว" is counted.
-        function cupsIn(day) {
-            return Object.values(day.items || {}).reduce((sum, item) => sum + Math.max(0, item.qty || 0), 0);
+        // Extras such as an added shot ride along on an order but aren't a drink of their own,
+        // so they never count as a cup — not in the report, not towards points, and not in a
+        // member's "สั่งไปแล้ว N แก้ว". Order lines carry the flag so a cancel undoes exactly
+        // what the sale counted.
+        function cupCount(lines) {
+            return (lines || []).reduce((sum, line) => sum + (line.addon ? 0 : (line.qty || 0)), 0);
+        }
+
+        // A day's tally lines only learned the flag once it existed, so older ones are checked
+        // against the menu as it stands — flagging an extra corrects its history too.
+        function isAddonTally(key, item, addonIds) {
+            return item.addon === true || addonIds.has(key.split('__')[0]);
+        }
+
+        function cupsIn(day, addonIds) {
+            return Object.entries(day.items || {}).reduce((sum, [key, item]) => (
+                isAddonTally(key, item, addonIds) ? sum : sum + Math.max(0, item.qty || 0)
+            ), 0);
         }
 
         const BEST_SELLER_PERIODS = [
@@ -179,6 +193,7 @@
                     serveType: i.serveType || '',
                     qty: inc(direction * i.qty),
                     revenue: inc(direction * i.qty * i.price),
+                    ...(i.addon ? { addon: true } : {}),
                 };
             });
             const batch = db.batch();
@@ -358,6 +373,7 @@
                 if (name && !data.name) updated.name = name;
                 t.update(ref, updated);
             });
+            if (itemCount <= 0) return;
             await db.collection('loyaltyEvents').add({
                 customerName: name || '', phone, type: 'ADD', amount: itemCount,
                 note: `ขายหน้าร้าน #${orderNumber} (+${itemCount})`, time: visitTime,
@@ -371,7 +387,7 @@
         async function reversePointsForOrder(order) {
             if (!order.phone) return;
             const points = order.pointsAwarded || 0;
-            const itemCount = order.itemCount || (order.items || []).reduce((sum, i) => sum + (i.qty || 0), 0);
+            const itemCount = typeof order.itemCount === 'number' ? order.itemCount : cupCount(order.items);
             const ref = db.collection('customers').doc(order.phone);
             const visitTime = timeString(new Date());
             await db.runTransaction(async (t) => {
@@ -877,6 +893,7 @@
                                 dailySales={dailySales}
                                 salesSummary={salesSummary}
                                 cashbookSummary={cashbookSummary}
+                                menuItems={menuItems}
                                 showToast={showToast}
                                 onRequestCancel={setCancellingOrder}
                             />
@@ -1212,11 +1229,14 @@
                 .map(([key, qty]) => {
                     const [menuId, serveType] = key.split('|');
                     const item = menuItems.find(m => m.id === menuId);
-                    return item ? { key, menuId, name: item.name, price: priceFor(item, serveType), qty, serveType } : null;
+                    return item ? {
+                        key, menuId, name: item.name, price: priceFor(item, serveType), qty, serveType,
+                        addon: item.addon === true,
+                    } : null;
                 })
                 .filter(Boolean), [cart, menuItems]);
 
-            const totalQty = cartItems.reduce((sum, i) => sum + i.qty, 0);
+            const cups = cupCount(cartItems);
             const total = cartItems.reduce((sum, i) => sum + i.price * i.qty, 0);
 
             const cleanPhone = phone.replace(/\D/g, '');
@@ -1288,9 +1308,11 @@
                     const dayKey = dateKey(new Date());
                     await db.collection('orders').add({
                         orderNumber,
-                        items: cartItems.map(({ menuId, name, price, qty, serveType }) => (
-                            serveType ? { menuId, name, price, qty, serveType } : { menuId, name, price, qty }
-                        )),
+                        items: cartItems.map(({ menuId, name, price, qty, serveType, addon }) => ({
+                            menuId, name, price, qty,
+                            ...(serveType ? { serveType } : {}),
+                            ...(addon ? { addon: true } : {}),
+                        })),
                         total,
                         orderType,
                         tableNumber: orderType === 'dine-in' ? tableNumber.trim() : '',
@@ -1298,8 +1320,8 @@
                         phone: cleanPhone,
                         note: note.trim(),
                         status: 'new',
-                        itemCount: totalQty,
-                        pointsAwarded: cleanPhone ? totalQty : 0,
+                        itemCount: cups,
+                        pointsAwarded: cleanPhone ? cups : 0,
                         dayKey,
                         createdAt: firebase.firestore.FieldValue.serverTimestamp(),
                         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
@@ -1311,9 +1333,11 @@
                         .catch(() => showToast('ออเดอร์บันทึกแล้ว แต่ยอดขายในรายงานไม่อัปเดต', 'error'));
                     if (cleanPhone) {
                         try {
-                            await earnPointsForOrder(cleanPhone, memberName, totalQty, orderNumber);
+                            await earnPointsForOrder(cleanPhone, memberName, cups, orderNumber);
                             playSound('stamp');
-                            showToast(`บันทึกออเดอร์ #${orderNumber} · สะสม +${totalQty} แต้ม`);
+                            showToast(cups > 0
+                                ? `บันทึกออเดอร์ #${orderNumber} · สะสม +${cups} แต้ม`
+                                : `บันทึกออเดอร์ #${orderNumber} สำเร็จ`);
                         } catch (e) {
                             showToast(`บันทึกออเดอร์ #${orderNumber} แล้ว แต่สะสมแต้มไม่สำเร็จ`, 'error');
                         }
@@ -1512,15 +1536,15 @@
                                                 แก้วฟรี: รับไปแล้ว {member.freeDrinksRedeemed || 0} · ยังไม่ได้รับ {member.freeDrinks || 0} แก้ว
                                             </p>
                                         )}
-                                        {totalQty > 0 && (
+                                        {cups > 0 && (
                                             <p className="text-[11px] font-semibold text-emerald-700">
-                                                ออเดอร์นี้ +{totalQty} แต้ม → รวมเป็น {(member.points || 0) + totalQty} แต้ม
+                                                ออเดอร์นี้ +{cups} แต้ม → รวมเป็น {(member.points || 0) + cups} แต้ม
                                             </p>
                                         )}
                                     </div>
                                 ) : cleanPhone.length >= 9 ? (
                                     <div className="mt-2 bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2 text-xs text-amber-800">
-                                        เบอร์ใหม่ · จะสมัครสมาชิกให้อัตโนมัติ{totalQty > 0 ? ` และรับ +${totalQty} แต้ม` : ''}
+                                        เบอร์ใหม่ · จะสมัครสมาชิกให้อัตโนมัติ{cups > 0 ? ` และรับ +${cups} แต้ม` : ''}
                                     </div>
                                 ) : null}
                             </div>
@@ -1572,6 +1596,7 @@
             const [category, setCategory] = useState('');
             const [price, setPrice] = useState('');
             const [newServeTypes, setNewServeTypes] = useState([]);
+            const [newAddon, setNewAddon] = useState(false);
 
             const categories = useMemo(() => {
                 const set = new Set(menuItems.map(m => m.category));
@@ -1594,8 +1619,9 @@
                 db.collection('menu').add({
                     name, category, price: parseFloat(price), available: true, sortOrder: maxSort + 1,
                     serveTypes: newServeTypes,
+                    addon: newAddon,
                 }).then(() => {
-                    setName(''); setCategory(''); setPrice(''); setNewServeTypes([]);
+                    setName(''); setCategory(''); setPrice(''); setNewServeTypes([]); setNewAddon(false);
                     showToast('เพิ่มเมนูสำเร็จ');
                 }).catch(() => showToast('เพิ่มเมนูไม่สำเร็จ', 'error'));
             };
@@ -1683,6 +1709,15 @@
                                     );
                                 })}
                                 <span className="text-[11px] text-stone-400">ไม่เลือก = ไม่ต้องถามตอนสั่ง (เช่น เบเกอรี่)</span>
+                                <button
+                                    type="button"
+                                    onClick={() => setNewAddon(!newAddon)}
+                                    className={`ml-auto px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                                        newAddon ? 'bg-sky-300 text-sky-950' : 'bg-stone-100 text-stone-500 hover:bg-sky-100'
+                                    }`}
+                                >
+                                    {newAddon ? 'ของเพิ่ม · ไม่นับแก้ว' : 'นับเป็นแก้ว'}
+                                </button>
                             </div>
                         </form>
                     </div>
@@ -1747,6 +1782,14 @@
                                         ) : (
                                             <span className="text-[11px] text-stone-300">ราคาต่อแบบ (บาท)</span>
                                         )}
+                                        <button
+                                            onClick={() => updateField(item, 'addon', !item.addon)}
+                                            className={`ml-auto px-3 py-1 rounded-lg text-[11px] font-semibold transition-all ${
+                                                item.addon ? 'bg-sky-300 text-sky-950' : 'bg-stone-100 text-stone-500 hover:bg-sky-100'
+                                            }`}
+                                        >
+                                            {item.addon ? 'ของเพิ่ม · ไม่นับแก้ว' : 'นับเป็นแก้ว'}
+                                        </button>
                                     </div>
                                 </div>
                             ))}
@@ -2374,11 +2417,13 @@
             );
         }
 
-        function ReportsView({ orders, cashbook, dailySales, salesSummary, cashbookSummary, showToast, onRequestCancel }) {
+        function ReportsView({ orders, cashbook, dailySales, salesSummary, cashbookSummary, menuItems, showToast, onRequestCancel }) {
             const [type, setType] = useState('income');
             const [entryDate, setEntryDate] = useState(() => dateKey(new Date()));
             const [note, setNote] = useState('');
             const [amount, setAmount] = useState('');
+
+            const addonIds = useMemo(() => new Set(menuItems.filter(m => m.addon).map(m => m.id)), [menuItems]);
 
             const salesByDay = useMemo(() => dailySales.map(day => {
                 const items = Object.entries(day.items || {})
@@ -2390,10 +2435,10 @@
                     count: day.orderCount || 0,
                     revenue: day.revenue || 0,
                     cancelledCount: day.cancelledCount || 0,
-                    cups: cupsIn(day),
+                    cups: cupsIn(day, addonIds),
                     items,
                 };
-            }).sort((a, b) => b.date.localeCompare(a.date)), [dailySales]);
+            }).sort((a, b) => b.date.localeCompare(a.date)), [dailySales, addonIds]);
 
             // Months are rolled up from the same day documents, so nothing extra is stored and
             // the comparison covers however much history the day window holds.
@@ -2404,7 +2449,7 @@
                     if (!month) return;
                     if (!map[month]) map[month] = { month, orderCount: 0, cups: 0, revenue: 0 };
                     map[month].orderCount += day.orderCount || 0;
-                    map[month].cups += cupsIn(day);
+                    map[month].cups += cupsIn(day, addonIds);
                     map[month].revenue += day.revenue || 0;
                 });
                 const ascending = Object.values(map).sort((a, b) => a.month.localeCompare(b.month));
@@ -2417,7 +2462,7 @@
                         };
                     })
                     .reverse();
-            }, [dailySales]);
+            }, [dailySales, addonIds]);
 
             const chartMonths = useMemo(() => salesByMonth.slice(0, 6).reverse(), [salesByMonth]);
             const maxMonthRevenue = Math.max(1, ...chartMonths.map(month => month.revenue));
@@ -2426,15 +2471,17 @@
             // per-day tallies. Iced and blended of one drink count together, with the split shown,
             // since "what sells" is a question about the drink.
             const [bestPeriod, setBestPeriod] = useState(7);
-            const bestSellers = useMemo(() => {
+            const best = useMemo(() => {
                 const start = new Date();
                 start.setDate(start.getDate() - (bestPeriod - 1));
                 const cutoff = dateKey(start);
                 const map = {};
+                let revenue = 0;
                 dailySales.forEach(day => {
                     if (!day.date || day.date < cutoff) return;
-                    Object.values(day.items || {}).forEach(item => {
-                        if (!(item.qty > 0)) return;
+                    revenue += day.revenue || 0;
+                    Object.entries(day.items || {}).forEach(([key, item]) => {
+                        if (!(item.qty > 0) || isAddonTally(key, item, addonIds)) return;
                         if (!map[item.name]) map[item.name] = { name: item.name, qty: 0, revenue: 0, byServe: {} };
                         const entry = map[item.name];
                         entry.qty += item.qty;
@@ -2442,12 +2489,11 @@
                         if (item.serveType) entry.byServe[item.serveType] = (entry.byServe[item.serveType] || 0) + item.qty;
                     });
                 });
-                return Object.values(map).sort((a, b) => b.qty - a.qty || b.revenue - a.revenue);
-            }, [dailySales, bestPeriod]);
-            const bestTotals = bestSellers.reduce(
-                (acc, item) => ({ qty: acc.qty + item.qty, revenue: acc.revenue + item.revenue }),
-                { qty: 0, revenue: 0 },
-            );
+                const ranked = Object.values(map).sort((a, b) => b.qty - a.qty || b.revenue - a.revenue);
+                return { ranked, cups: ranked.reduce((sum, item) => sum + item.qty, 0), revenue };
+            }, [dailySales, bestPeriod, addonIds]);
+            const bestSellers = best.ranked;
+            const bestTotals = { qty: best.cups, revenue: best.revenue };
 
             // Income is sales revenue plus any manually-logged income (e.g. cash income outside
             // the ordering flow); expense is manual only since nothing else in the app spends money.
