@@ -36,9 +36,10 @@ service cloud.firestore {
       allow write: if request.resource.data.keys().hasOnly(['count']) && request.resource.data.count is number;
     }
 
-    // Rolled-up takings: one small document per day (id "YYYY-MM-DD") and one running all-time
-    // total in summary/sales. The daily report reads these rather than every order ever placed,
-    // which is what keeps it correct and cheap as the months add up.
+    // Rolled-up takings: one small document per day (id "YYYY-MM-DD") and running totals in
+    // summary/sales and summary/cashbook, plus the member total in summary/members. The report
+    // reads these rather than every order ever placed, which keeps it correct and cheap as the
+    // months add up.
     match /dailySales/{day} {
       allow read: if true;
       allow write: if request.resource.data.keys().hasOnly(
@@ -49,7 +50,8 @@ service cloud.firestore {
 
     match /summary/{docId} {
       allow read: if true;
-      allow write: if request.resource.data.keys().hasOnly(['orderCount', 'revenue', 'income', 'expense'])
+      allow write: if request.resource.data.keys().hasOnly(['orderCount', 'revenue', 'income', 'expense', 'count'])
+        && (!('count' in request.resource.data) || request.resource.data.count is number)
         && (!('revenue' in request.resource.data) || request.resource.data.revenue is number)
         && (!('income' in request.resource.data) || request.resource.data.income is number)
         && (!('expense' in request.resource.data) || request.resource.data.expense is number);

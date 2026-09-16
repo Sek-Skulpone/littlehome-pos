@@ -246,6 +246,18 @@
             return (lines || []).reduce((sum, line) => sum + (line.addon ? 0 : (line.qty || 0)), 0);
         }
 
+        // Must match the back office's copy: these runs are what its member search looks up, so a
+        // member signed up here without them could only be found by their exact number.
+        function memberSearchKeys(name, phone) {
+            const keys = new Set();
+            [String(name || '').toLowerCase(), String(phone || '')].forEach(text => {
+                for (let size = 1; size <= 3; size++) {
+                    for (let i = 0; i + size <= text.length; i++) keys.add(text.slice(i, i + size));
+                }
+            });
+            return [...keys];
+        }
+
         // Best-effort membership tracking: the order itself already succeeded by the time this
         // runs, so a failure here is swallowed by the caller rather than blocking the order.
         async function upsertCustomerAfterOrder(phone, name, itemCount) {
@@ -257,9 +269,12 @@
                     const data = {
                         phone, name: name || '', points: 0, totalEarned: 0,
                         totalDrinks: itemCount, orderCount: 1, lastVisit: visitTime,
+                        searchKeys: memberSearchKeys(name, phone),
                         createdAt: firebase.firestore.FieldValue.serverTimestamp(),
                     };
                     t.set(ref, data);
+                    t.set(db.collection('summary').doc('members'),
+                        { count: firebase.firestore.FieldValue.increment(1) }, { merge: true });
                     return data;
                 }
                 const data = snap.data();
@@ -270,7 +285,10 @@
                 };
                 // Only fill a blank name. Whatever the shop has on the member card was curated
                 // from the back office, and a nickname typed at checkout should not overwrite it.
-                if (name && !data.name) updated.name = name;
+                if (name && !data.name) {
+                    updated.name = name;
+                    updated.searchKeys = memberSearchKeys(name, phone);
+                }
                 t.update(ref, updated);
                 return { ...data, ...updated };
             });
