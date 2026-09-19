@@ -513,7 +513,7 @@
         }
 
         function App() {
-            const [activeTab, setActiveTab] = useState('orders'); // 'orders', 'sale', 'pos', 'customers', 'history', 'reports', 'menu', 'settings'
+            const [activeTab, setActiveTab] = useState('orders'); // 'orders', 'sale', 'pos', 'customers', 'history', 'reports', 'cashbook', 'menu', 'settings'
             const [cancellingOrder, setCancellingOrder] = useState(null);
             const [customers, setCustomers] = useState([]);
             const [rewards, setRewards] = useState(() => {
@@ -863,6 +863,7 @@
                             <NavButton active={activeTab === 'customers'} onClick={() => setActiveTab('customers')} icon="users" label="รายชื่อลูกค้า" />
                             <NavButton active={activeTab === 'history'} onClick={() => setActiveTab('history')} icon="history" label="ประวัติทำรายการ" />
                             <NavButton active={activeTab === 'reports'} onClick={() => setActiveTab('reports')} icon="bar-chart-3" label="รายงานประจำวัน" />
+                            <NavButton active={activeTab === 'cashbook'} onClick={() => setActiveTab('cashbook')} icon="wallet" label="รายรับ-รายจ่าย" />
                             <NavButton active={activeTab === 'menu'} onClick={() => setActiveTab('menu')} icon="book-open" label="จัดการเมนู" />
                             <NavButton active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} icon="gift" label="จัดการรางวัล" />
                         </nav>
@@ -927,13 +928,16 @@
                         )}
 
                         {activeTab === 'reports' && (
-                            <ReportsView
+                            <ReportsView dailySales={dailySales} menuItems={menuItems} />
+                        )}
+
+                        {activeTab === 'cashbook' && (
+                            <CashbookView
                                 orders={orders}
                                 cashbook={cashbook}
                                 dailySales={dailySales}
                                 salesSummary={salesSummary}
                                 cashbookSummary={cashbookSummary}
-                                menuItems={menuItems}
                                 showToast={showToast}
                                 onRequestCancel={setCancellingOrder}
                             />
@@ -2474,12 +2478,7 @@
             );
         }
 
-        function ReportsView({ orders, cashbook, dailySales, salesSummary, cashbookSummary, menuItems, showToast, onRequestCancel }) {
-            const [type, setType] = useState('income');
-            const [entryDate, setEntryDate] = useState(() => dateKey(new Date()));
-            const [note, setNote] = useState('');
-            const [amount, setAmount] = useState('');
-
+        function ReportsView({ dailySales, menuItems }) {
             const addonIds = useMemo(() => new Set(menuItems.filter(m => m.addon).map(m => m.id)), [menuItems]);
 
             const salesByDay = useMemo(() => dailySales.map(day => {
@@ -2552,72 +2551,11 @@
             const bestSellers = best.ranked;
             const bestTotals = { qty: best.cups, revenue: best.revenue };
 
-            // Income is sales revenue plus any manually-logged income (e.g. cash income outside
-            // the ordering flow); expense is manual only since nothing else in the app spends money.
-            // A day's takings come from its rolled-up total, while the individual sale lines are
-            // drawn from the recent orders still in memory — so older days show the figure without
-            // the itemised rows rather than a figure that quietly shrinks as orders age out.
-            const ledgerByDay = useMemo(() => {
-                const map = {};
-                const dayOf = (date) => {
-                    if (!map[date]) map[date] = { date, salesRevenue: 0, manualIncome: 0, expense: 0, orders: [], entries: [] };
-                    return map[date];
-                };
-                dailySales.forEach(day => {
-                    const target = dayOf(day.date);
-                    target.salesRevenue = day.revenue || 0;
-                    target.manualIncome = day.manualIncome || 0;
-                    target.expense = day.manualExpense || 0;
-                });
-                orders.forEach(order => {
-                    if (order.status === 'cancelled') return;
-                    dayOf(orderDayKey(order)).orders.push(order);
-                });
-                cashbook.forEach(entry => { dayOf(entry.date).entries.push(entry); });
-                return Object.values(map)
-                    .map(day => ({ ...day, income: day.salesRevenue + day.manualIncome, net: day.salesRevenue + day.manualIncome - day.expense }))
-                    .sort((a, b) => b.date.localeCompare(a.date));
-            }, [dailySales, orders, cashbook]);
-
-            const grandTotals = useMemo(() => {
-                const salesRevenue = salesSummary.revenue || 0;
-                const manualIncome = cashbookSummary.income || 0;
-                return {
-                    salesRevenue,
-                    manualIncome,
-                    income: salesRevenue + manualIncome,
-                    expense: cashbookSummary.expense || 0,
-                };
-            }, [salesSummary, cashbookSummary]);
-
-            const handleAddEntry = (e) => {
-                e.preventDefault();
-                const amt = parseFloat(amount);
-                if (!amt || amt <= 0 || !note.trim() || !entryDate) return;
-                const entry = { type, amount: amt, note: note.trim(), date: entryDate };
-                db.collection('cashbook').add({
-                    ...entry,
-                    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-                }).then(() => {
-                    setNote('');
-                    setAmount('');
-                    showToast(type === 'income' ? 'บันทึกรายรับสำเร็จ' : 'บันทึกรายจ่ายสำเร็จ');
-                    return recordCashbook(entryDate, entry, 1);
-                }).catch(() => showToast('บันทึกไม่สำเร็จ', 'error'));
-            };
-
-            const handleDeleteEntry = (entry) => {
-                db.collection('cashbook').doc(entry.id).delete()
-                    .then(() => recordCashbook(entry.date, entry, -1))
-                    .then(() => showToast('ลบรายการเรียบร้อยแล้ว'))
-                    .catch(() => showToast('ลบไม่สำเร็จ', 'error'));
-            };
-
             return (
                 <div className="max-w-5xl mx-auto space-y-6">
                     <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
                         <h2 className="text-2xl font-bold text-stone-800">รายงานประจำวัน</h2>
-                        <p className="text-xs text-stone-400 mt-0.5">สรุปยอดขายและรายรับ-รายจ่ายของร้าน</p>
+                        <p className="text-xs text-stone-400 mt-0.5">สรุปยอดขายของร้าน</p>
                     </div>
 
                     <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100 space-y-4">
@@ -2787,10 +2725,88 @@
                             </div>
                         )}
                     </div>
+                </div>
+            );
+        }
+
+        // Money in and out of the shop: takings from orders plus anything logged by hand, set
+        // against what was spent. It's where staff key entries in, so it gets its own page
+        // rather than sitting under the read-only sales report.
+        function CashbookView({ orders, cashbook, dailySales, salesSummary, cashbookSummary, showToast, onRequestCancel }) {
+            const [type, setType] = useState('income');
+            const [entryDate, setEntryDate] = useState(() => dateKey(new Date()));
+            const [note, setNote] = useState('');
+            const [amount, setAmount] = useState('');
+
+            // Income is sales revenue plus any manually-logged income (e.g. cash income outside
+            // the ordering flow); expense is manual only since nothing else in the app spends money.
+            // A day's takings come from its rolled-up total, while the individual sale lines are
+            // drawn from the recent orders still in memory — so older days show the figure without
+            // the itemised rows rather than a figure that quietly shrinks as orders age out.
+            const ledgerByDay = useMemo(() => {
+                const map = {};
+                const dayOf = (date) => {
+                    if (!map[date]) map[date] = { date, salesRevenue: 0, manualIncome: 0, expense: 0, orders: [], entries: [] };
+                    return map[date];
+                };
+                dailySales.forEach(day => {
+                    const target = dayOf(day.date);
+                    target.salesRevenue = day.revenue || 0;
+                    target.manualIncome = day.manualIncome || 0;
+                    target.expense = day.manualExpense || 0;
+                });
+                orders.forEach(order => {
+                    if (order.status === 'cancelled') return;
+                    dayOf(orderDayKey(order)).orders.push(order);
+                });
+                cashbook.forEach(entry => { dayOf(entry.date).entries.push(entry); });
+                return Object.values(map)
+                    .map(day => ({ ...day, income: day.salesRevenue + day.manualIncome, net: day.salesRevenue + day.manualIncome - day.expense }))
+                    .sort((a, b) => b.date.localeCompare(a.date));
+            }, [dailySales, orders, cashbook]);
+
+            const grandTotals = useMemo(() => {
+                const salesRevenue = salesSummary.revenue || 0;
+                const manualIncome = cashbookSummary.income || 0;
+                return {
+                    salesRevenue,
+                    manualIncome,
+                    income: salesRevenue + manualIncome,
+                    expense: cashbookSummary.expense || 0,
+                };
+            }, [salesSummary, cashbookSummary]);
+
+            const handleAddEntry = (e) => {
+                e.preventDefault();
+                const amt = parseFloat(amount);
+                if (!amt || amt <= 0 || !note.trim() || !entryDate) return;
+                const entry = { type, amount: amt, note: note.trim(), date: entryDate };
+                db.collection('cashbook').add({
+                    ...entry,
+                    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                }).then(() => {
+                    setNote('');
+                    setAmount('');
+                    showToast(type === 'income' ? 'บันทึกรายรับสำเร็จ' : 'บันทึกรายจ่ายสำเร็จ');
+                    return recordCashbook(entryDate, entry, 1);
+                }).catch(() => showToast('บันทึกไม่สำเร็จ', 'error'));
+            };
+
+            const handleDeleteEntry = (entry) => {
+                db.collection('cashbook').doc(entry.id).delete()
+                    .then(() => recordCashbook(entry.date, entry, -1))
+                    .then(() => showToast('ลบรายการเรียบร้อยแล้ว'))
+                    .catch(() => showToast('ลบไม่สำเร็จ', 'error'));
+            };
+
+            return (
+                <div className="max-w-5xl mx-auto space-y-6">
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
+                        <h2 className="text-2xl font-bold text-stone-800">รายรับ-รายจ่าย</h2>
+                        <p className="text-xs text-stone-400 mt-0.5">เงินเข้า-ออกของร้าน ยอดขายจากออเดอร์รวมให้อัตโนมัติ</p>
+                    </div>
 
                     <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100 space-y-5">
-                        <h3 className="font-bold text-stone-800 text-sm uppercase tracking-wider text-stone-500">บันทึกรายรับ-รายจ่าย</h3>
-
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                             <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4">
                                 <p className="text-xs text-emerald-700 font-semibold">รายรับรวมทั้งหมด</p>
