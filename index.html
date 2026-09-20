@@ -216,8 +216,22 @@
         function recordSale(dayKey, order, direction) {
             const inc = firebase.firestore.FieldValue.increment;
             const items = {};
+            const freeItems = {};
+            let freeCups = 0;
             (order.items || []).forEach(i => {
-                items[`${i.menuId}__${i.serveType || 'plain'}`] = {
+                const key = `${i.menuId}__${i.serveType || 'plain'}`;
+                // Loyalty-card drinks are handed out from the staff page, never ordered here,
+                // but the tally is written the same way in both so the day's totals match.
+                if (i.free) {
+                    freeItems[key] = {
+                        name: i.name,
+                        serveType: i.serveType || '',
+                        qty: inc(direction * i.qty),
+                    };
+                    freeCups += i.qty;
+                    return;
+                }
+                items[key] = {
                     name: i.name,
                     serveType: i.serveType || '',
                     qty: inc(direction * i.qty),
@@ -231,7 +245,8 @@
                 orderCount: inc(direction),
                 cancelledCount: inc(direction < 0 ? 1 : 0),
                 revenue: inc(direction * (order.total || 0)),
-                items,
+                ...(Object.keys(items).length ? { items } : {}),
+                ...(freeCups ? { freeItems, freeCount: inc(direction * freeCups) } : {}),
             }, { merge: true });
             batch.set(db.collection('summary').doc('sales'), {
                 orderCount: inc(direction),

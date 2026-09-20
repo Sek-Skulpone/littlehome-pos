@@ -135,6 +135,15 @@
             return customer.name || 'ไม่ระบุชื่อ';
         }
 
+        const MAX_STAMPS_PER_CARD = 10;
+
+        // Free drinks a member can take right now: the ones already banked on their record
+        // plus however many full cards their points still add up to.
+        function freeDrinkCredit(member) {
+            if (!member) return 0;
+            return (member.freeDrinks || 0) + Math.floor((member.points || 0) / MAX_STAMPS_PER_CARD);
+        }
+
         function timeString(date) {
             return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
         }
@@ -165,6 +174,12 @@
             ), 0);
         }
 
+        // Days written before free drinks were rung up have neither field, which reads as zero.
+        function freeCupsIn(day) {
+            if (typeof day.freeCount === 'number') return Math.max(0, day.freeCount);
+            return Object.values(day.freeItems || {}).reduce((sum, item) => sum + Math.max(0, item.qty || 0), 0);
+        }
+
         const BEST_SELLER_PERIODS = [
             { days: 1, label: 'วันนี้' },
             { days: 7, label: '7 วัน' },
@@ -187,8 +202,23 @@
         function recordSale(dayKey, order, direction) {
             const inc = firebase.firestore.FieldValue.increment;
             const items = {};
+            const freeItems = {};
+            let freeCups = 0;
             (order.items || []).forEach(i => {
-                items[`${i.menuId}__${i.serveType || 'plain'}`] = {
+                const key = `${i.menuId}__${i.serveType || 'plain'}`;
+                // A redeemed drink leaves the counter like any other, but it was never sold.
+                // It is tallied on its own so "what sold" stays an answer about sales, while
+                // the day still knows how many cups the shop actually made.
+                if (i.free) {
+                    freeItems[key] = {
+                        name: i.name,
+                        serveType: i.serveType || '',
+                        qty: inc(direction * i.qty),
+                    };
+                    freeCups += i.qty;
+                    return;
+                }
+                items[key] = {
                     name: i.name,
                     serveType: i.serveType || '',
                     qty: inc(direction * i.qty),
@@ -202,7 +232,8 @@
                 orderCount: inc(direction),
                 cancelledCount: inc(direction < 0 ? 1 : 0),
                 revenue: inc(direction * (order.total || 0)),
-                items,
+                ...(Object.keys(items).length ? { items } : {}),
+                ...(freeCups ? { freeItems, freeCount: inc(direction * freeCups) } : {}),
             }, { merge: true });
             batch.set(db.collection('summary').doc('sales'), {
                 orderCount: inc(direction),
@@ -308,7 +339,14 @@
                                     <p className="text-[11px] text-stone-400">{formatPhone(m.phone)}</p>
                                 </div>
                             </div>
-                            <span className="text-xs font-bold text-amber-700 shrink-0">{m.points || 0} แต้ม</span>
+                            <div className="shrink-0 text-right">
+                                <span className="text-xs font-bold text-amber-700">{m.points || 0} แต้ม</span>
+                                {freeDrinkCredit(m) > 0 && (
+                                    <p className="text-[10px] font-bold text-sky-800 bg-sky-100 rounded px-1.5 py-0.5 mt-0.5">
+                                        แก้วฟรี {freeDrinkCredit(m)}
+                                    </p>
+                                )}
+                            </div>
                         </button>
                     ))}
                 </div>
@@ -434,6 +472,76 @@
             }
         }
 
+        // Handing a free drink over spends the ones already banked first and only then a full
+        // card's worth of points, so drinks the customer was promised are used before fresh
+        // stamps are. Throws if the card can't cover it, which keeps a double-tap honest.
+        async function spendFreeDrinks(phone, name, cups, label) {
+            if (!phone || cups <= 0) return;
+            const ref = db.collection('customers').doc(phone);
+            const visitTime = timeString(new Date());
+            let pointsSpent = 0;
+            await db.runTransaction(async (t) => {
+                const snap = await t.get(ref);
+                if (!snap.exists) throw new Error('member not found');
+                const data = snap.data();
+                const banked = Math.min(cups, data.freeDrinks || 0);
+                pointsSpent = (cups - banked) * MAX_STAMPS_PER_CARD;
+                if ((data.points || 0) < pointsSpent) throw new Error('not enough points');
+                t.update(ref, {
+                    freeDrinks: Math.max(0, (data.freeDrinks || 0) - banked),
+                    freeDrinksRedeemed: (data.freeDrinksRedeemed || 0) + cups,
+                    points: Math.max(0, (data.points || 0) - pointsSpent),
+                    lastVisit: visitTime,
+                });
+            });
+            await db.collection('loyaltyEvents').add({
+                customerName: name || '', phone, type: 'REDEEM', amount: pointsSpent,
+                note: `รับแก้วฟรี: ${label}`, time: visitTime,
+                createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+            });
+        }
+
+        // Banking a full card: the customer would rather take the drink another day. The stamps
+        // are spent now so a fresh card starts, and the drink waits on their record until it is
+        // actually handed over — which is when it counts as received.
+        async function bankFreeDrink(phone, name) {
+            const ref = db.collection('customers').doc(phone);
+            const visitTime = timeString(new Date());
+            await db.runTransaction(async (t) => {
+                const snap = await t.get(ref);
+                if (!snap.exists) throw new Error('member not found');
+                const data = snap.data();
+                if ((data.points || 0) < MAX_STAMPS_PER_CARD) throw new Error('card not full');
+                t.update(ref, {
+                    points: (data.points || 0) - MAX_STAMPS_PER_CARD,
+                    freeDrinks: (data.freeDrinks || 0) + 1,
+                    lastVisit: visitTime,
+                });
+            });
+            await db.collection('loyaltyEvents').add({
+                customerName: name || '', phone, type: 'REDEEM', amount: MAX_STAMPS_PER_CARD,
+                note: 'บัตรเต็ม: เก็บเครื่องดื่มฟรีไว้ใช้ทีหลัง', time: visitTime,
+                createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+            });
+        }
+
+        // A cancelled order gives the entitlement back rather than the ten stamps it may have
+        // come from: the drink was never poured, so the customer keeps their free cup.
+        async function restoreFreeDrinks(order) {
+            const cups = (order.items || []).reduce((sum, i) => sum + (i.free ? (i.qty || 0) : 0), 0);
+            if (!order.phone || cups <= 0) return;
+            const ref = db.collection('customers').doc(order.phone);
+            await db.runTransaction(async (t) => {
+                const snap = await t.get(ref);
+                if (!snap.exists) return;
+                const data = snap.data();
+                t.update(ref, {
+                    freeDrinks: (data.freeDrinks || 0) + cups,
+                    freeDrinksRedeemed: Math.max(0, (data.freeDrinksRedeemed || 0) - cups),
+                });
+            });
+        }
+
         const INITIAL_REWARDS = [
             { id: 'r1', name: 'ฟรี! กาแฟ/เครื่องดื่ม 1 แก้ว (เมนูใดก็ได้)', pointsRequired: 10, icon: 'coffee' },
             { id: 'r2', name: 'ส่วนลด 50 บาท', pointsRequired: 5, icon: 'tag' },
@@ -529,7 +637,7 @@
             const [newCustomerName, setNewCustomerName] = useState('');
             const [showRedeemModal, setShowRedeemModal] = useState(false);
             const [notification, setNotification] = useState(null);
-            const [maxStampsPerCard, setMaxStampsPerCard] = useState(10);
+            const [freeDrinkPick, setFreeDrinkPick] = useState(false);
 
             const [orders, setOrders] = useState([]);
             const [menuItems, setMenuItems] = useState([]);
@@ -711,50 +819,57 @@
                 }).catch(() => showToast('บันทึกแต้มไม่สำเร็จ', 'error'));
             };
 
-            // A full card is always spent, so the customer starts a fresh one either way. The
-            // choice is only whether the free drink is poured now or banked on their account
-            // for a later visit.
-            const handleCompleteCard = (keep) => {
-                if (!selectedCustomer || (selectedCustomer.points || 0) < maxStampsPerCard) return;
+            // A full card can be spent without a drink being poured: banking it starts a fresh
+            // card and keeps the free cup on the customer's record for a later visit.
+            const handleKeepFreeDrink = () => {
+                if (!selectedCustomer || (selectedCustomer.points || 0) < MAX_STAMPS_PER_CARD) return;
                 playSound('redeem');
-                const visitTime = timeString(new Date());
-                const update = {
-                    points: firebase.firestore.FieldValue.increment(-maxStampsPerCard),
-                    lastVisit: visitTime,
-                };
-                // Banked drinks are counted as received only when they are actually handed over.
-                if (keep) update.freeDrinks = firebase.firestore.FieldValue.increment(1);
-                else update.freeDrinksRedeemed = firebase.firestore.FieldValue.increment(1);
-                db.collection('customers').doc(selectedCustomer.id).update(update).then(() => {
-                    return db.collection('loyaltyEvents').add({
-                        customerName: selectedCustomer.name, phone: selectedCustomer.phone,
-                        type: 'REDEEM', amount: maxStampsPerCard,
-                        note: keep ? 'บัตรเต็ม: เก็บเครื่องดื่มฟรีไว้ใช้ทีหลัง' : 'บัตรเต็ม: รับเครื่องดื่มฟรีทันที',
-                        time: visitTime, createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-                    });
-                }).then(() => {
-                    showToast(keep ? 'เก็บสิทธิ์เครื่องดื่มฟรีไว้ให้แล้ว' : 'รับเครื่องดื่มฟรีเรียบร้อย');
-                }).catch(() => showToast('ทำรายการไม่สำเร็จ', 'error'));
+                bankFreeDrink(selectedCustomer.id, selectedCustomer.name)
+                    .then(() => showToast('เก็บสิทธิ์เครื่องดื่มฟรีไว้ให้แล้ว'))
+                    .catch(() => showToast('ทำรายการไม่สำเร็จ', 'error'));
             };
 
-            const handleUseFreeDrink = () => {
-                if (!selectedCustomer || !(selectedCustomer.freeDrinks > 0)) return;
-                playSound('redeem');
-                const visitTime = timeString(new Date());
-                db.collection('customers').doc(selectedCustomer.id).update({
-                    freeDrinks: firebase.firestore.FieldValue.increment(-1),
-                    freeDrinksRedeemed: firebase.firestore.FieldValue.increment(1),
-                    lastVisit: visitTime,
-                }).then(() => {
-                    return db.collection('loyaltyEvents').add({
-                        customerName: selectedCustomer.name, phone: selectedCustomer.phone,
-                        type: 'REDEEM', amount: 0,
-                        note: 'ใช้เครื่องดื่มฟรีที่เก็บไว้', time: visitTime,
+            // Handing the drink over asks which one, because the shop has to know what it made.
+            // The free cup is then rung up as an order at zero baht: the bar sees it, the day's
+            // free-drink tally counts it, and the takings stay exactly as they were.
+            const confirmFreeDrink = async (item, serveType) => {
+                const member = selectedCustomer;
+                setFreeDrinkPick(false);
+                if (!member || freeDrinkCredit(member) <= 0) return;
+                const phone = member.phone || member.id;
+                const line = {
+                    menuId: item.id, name: item.name, price: 0, qty: 1, free: true,
+                    ...(serveType ? { serveType } : {}),
+                };
+                const dayKey = dateKey(new Date());
+                try {
+                    const orderNumber = await getNextOrderNumber();
+                    await db.collection('orders').add({
+                        orderNumber,
+                        items: [line],
+                        total: 0,
+                        orderType: 'takeaway',
+                        tableNumber: '',
+                        customerName: memberLabel(member),
+                        phone,
+                        note: 'แก้วฟรีจากบัตรสะสมแต้ม',
+                        status: 'new',
+                        itemCount: 0,
+                        pointsAwarded: 0,
+                        free: true,
+                        freeCount: 1,
+                        dayKey,
                         createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
                     });
-                }).then(() => {
-                    showToast('ใช้เครื่องดื่มฟรีเรียบร้อย');
-                }).catch(() => showToast('ทำรายการไม่สำเร็จ', 'error'));
+                    playSound('redeem');
+                    recordSale(dayKey, { items: [line], total: 0 }, 1)
+                        .catch(() => showToast('แจกแก้วฟรีแล้ว แต่รายงานไม่อัปเดต', 'error'));
+                    await spendFreeDrinks(phone, member.name, 1, itemLabel(line));
+                    showToast(`แจกแก้วฟรี ${itemLabel(line)} · ออเดอร์ #${orderNumber}`);
+                } catch (e) {
+                    showToast('ทำรายการไม่สำเร็จ', 'error');
+                }
             };
 
             const handleRegisterCustomer = async (e) => {
@@ -830,7 +945,8 @@
                     updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
                 }).then(() => Promise.all([
                     recordSale(orderDayKey(order), order, -1),
-                    reversePointsForOrder(order),
+                    order.free ? Promise.resolve() : reversePointsForOrder(order),
+                    restoreFreeDrinks(order),
                 ])).then(() => showToast(`ยกเลิกออเดอร์ #${order.orderNumber} แล้ว`))
                     .catch(() => showToast('ยกเลิกออเดอร์ไม่สำเร็จ', 'error'));
             };
@@ -897,12 +1013,11 @@
                                 selectedCustomer={selectedCustomer}
                                 setSelectedPhone={setSelectedPhone}
                                 handleAddPoints={handleAddPoints}
-                                handleCompleteCard={handleCompleteCard}
-                                handleUseFreeDrink={handleUseFreeDrink}
+                                handleKeepFreeDrink={handleKeepFreeDrink}
+                                onGiveFreeDrink={() => setFreeDrinkPick(true)}
                                 setShowNewCustomerModal={setShowNewCustomerModal}
                                 setShowRedeemModal={setShowRedeemModal}
                                 formatPhone={formatPhone}
-                                maxStampsPerCard={maxStampsPerCard}
                                 customers={customers}
                             />
                         )}
@@ -1020,6 +1135,15 @@
                         </div>
                     )}
 
+                    {freeDrinkPick && selectedCustomer && (
+                        <FreeDrinkModal
+                            member={selectedCustomer}
+                            menuItems={menuItems}
+                            onClose={() => setFreeDrinkPick(false)}
+                            onConfirm={confirmFreeDrink}
+                        />
+                    )}
+
                     {showRedeemModal && selectedCustomer && (
                         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
                             <div className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-sm border border-stone-100 transform transition-all">
@@ -1095,6 +1219,124 @@
                         />
                     )}
 
+                </div>
+            );
+        }
+
+        // Which drink is being handed over. The shop has to know what left the counter, so a
+        // free cup is chosen from the same menu as a sold one, options and all.
+        function FreeDrinkModal({ member, menuItems, onClose, onConfirm }) {
+            const [picked, setPicked] = useState(null);
+            const [saving, setSaving] = useState(false);
+
+            const grouped = useMemo(() => {
+                const byCat = {};
+                menuItems.filter(m => m.available !== false && !m.addon).forEach(item => {
+                    if (!byCat[item.category]) byCat[item.category] = [];
+                    byCat[item.category].push(item);
+                });
+                return byCat;
+            }, [menuItems]);
+
+            const choose = (item, serveType) => {
+                playSound('tap');
+                setPicked({ item, serveType: serveType || '' });
+            };
+
+            const confirm = () => {
+                if (!picked || saving) return;
+                setSaving(true);
+                onConfirm(picked.item, picked.serveType);
+            };
+
+            return (
+                <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-sm border border-stone-100 flex flex-col max-h-[90vh]">
+                        <div className="flex justify-between items-start mb-4">
+                            <div>
+                                <h3 className="text-xl font-bold text-stone-800">เลือกเมนูแก้วฟรี</h3>
+                                <p className="text-xs text-stone-500 mt-0.5">
+                                    {memberLabel(member)} · รับได้ {freeDrinkCredit(member)} แก้ว · ครั้งนี้ให้ 1 แก้ว ที่เหลือเก็บไว้ได้
+                                </p>
+                            </div>
+                            <button onClick={onClose} className="text-stone-400 hover:text-stone-600">
+                                <Icon name="x" className="w-6 h-6"></Icon>
+                            </button>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto space-y-4 -mx-1 px-1">
+                            {Object.keys(grouped).length === 0 ? (
+                                <p className="text-sm text-stone-400 text-center py-6">ยังไม่มีเมนูที่พร้อมขาย</p>
+                            ) : Object.keys(grouped).map(cat => (
+                                <div key={cat} className="space-y-2">
+                                    <div className="flex items-center space-x-2 px-1">
+                                        <Icon name={CATEGORY_ICONS[cat] || 'utensils'} className="w-4 h-4 text-amber-700"></Icon>
+                                        <h4 className="font-bold text-stone-700 text-sm">{cat}</h4>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        {grouped[cat].map(item => {
+                                            const options = serveOptions(item);
+                                            const many = options.length > 1;
+                                            const isPicked = picked && picked.item.id === item.id;
+                                            return (
+                                                <div
+                                                    key={item.id}
+                                                    onClick={many ? undefined : () => choose(item, options[0])}
+                                                    className={`p-3 rounded-2xl border text-left transition-all ${many ? '' : 'cursor-pointer active:scale-95'} ${
+                                                        isPicked && (!many || picked.serveType)
+                                                            ? 'bg-sky-100 border-sky-400 shadow-sm'
+                                                            : 'bg-white border-stone-100 hover:border-sky-200'
+                                                    }`}
+                                                >
+                                                    <p className="font-semibold text-stone-800 text-sm leading-tight">{item.name}</p>
+                                                    {options.length === 1 && (
+                                                        <p className="text-[11px] text-stone-400 mt-1">มีแต่แบบ{serveLabel(options[0])}</p>
+                                                    )}
+                                                    {many && (
+                                                        <div className="grid grid-cols-2 gap-1 mt-2">
+                                                            {options.map(t => (
+                                                                <button
+                                                                    key={t}
+                                                                    onClick={() => choose(item, t)}
+                                                                    className={`py-1.5 rounded-lg text-[11px] font-semibold transition-all active:scale-95 ${
+                                                                        isPicked && picked.serveType === t
+                                                                            ? 'bg-sky-300 text-sky-950'
+                                                                            : 'bg-stone-100 text-stone-600 hover:bg-sky-100'
+                                                                    }`}
+                                                                >
+                                                                    {serveLabel(t)}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="pt-4 flex space-x-3">
+                            <button
+                                onClick={onClose}
+                                className="flex-1 py-3 px-4 border border-stone-200 rounded-2xl font-medium text-stone-600 hover:bg-stone-50"
+                            >
+                                ยกเลิก
+                            </button>
+                            <button
+                                onClick={confirm}
+                                disabled={!picked || saving}
+                                className={`flex-1 py-3 px-4 rounded-2xl font-bold shadow-sm transition-all ${
+                                    picked && !saving
+                                        ? 'bg-sky-300 hover:bg-sky-400 text-sky-950 active:scale-95'
+                                        : 'bg-stone-200 text-stone-400 cursor-not-allowed'
+                                }`}
+                            >
+                                {picked ? `ให้ฟรี: ${itemLabel({ name: picked.item.name, serveType: picked.serveType })}` : 'เลือกเมนูก่อน'}
+                            </button>
+                        </div>
+                    </div>
                 </div>
             );
         }
@@ -1187,7 +1429,10 @@
                                             <div className="text-xs text-stone-600 space-y-0.5 border-t border-stone-50 pt-2">
                                                 {order.items.map((item, idx) => (
                                                     <div key={idx} className="flex justify-between">
-                                                        <span>{itemLabel(item)} x{item.qty}</span>
+                                                        <span>
+                                                            {itemLabel(item)} x{item.qty}
+                                                            {item.free && <span className="ml-1 text-[10px] font-bold text-sky-800">(ฟรี)</span>}
+                                                        </span>
                                                     </div>
                                                 ))}
                                             </div>
@@ -1195,7 +1440,12 @@
                                                 <p className="text-[11px] text-amber-700 bg-amber-50 rounded-lg px-2 py-1">หมายเหตุ: {order.note}</p>
                                             )}
                                             <div className="flex justify-between items-center pt-1">
-                                                <span className="text-sm font-bold text-stone-700">{order.total} บาท</span>
+                                                <span className="text-sm font-bold text-stone-700">
+                                                    {order.total} บาท
+                                                    {order.items.some(i => i.free) && (
+                                                        <span className="ml-1.5 text-[10px] font-bold bg-sky-200 text-sky-900 rounded px-1.5 py-0.5 align-middle">แก้วฟรี</span>
+                                                    )}
+                                                </span>
                                                 <div className="flex space-x-1.5">
                                                     <button
                                                         onClick={() => onRequestCancel(order)}
@@ -1258,6 +1508,10 @@
             const [phone, setPhone] = useState('');
             const [note, setNote] = useState('');
             const [submitting, setSubmitting] = useState(false);
+            // Free drinks ride along in the same order as a separate, unpriced cart, so a
+            // customer collecting their reward alongside a paid round is one ticket.
+            const [freeCart, setFreeCart] = useState({});
+            const [freePicking, setFreePicking] = useState(false);
 
             const grouped = useMemo(() => {
                 const byCat = {};
@@ -1283,6 +1537,17 @@
             const cups = cupCount(cartItems);
             const total = cartItems.reduce((sum, i) => sum + i.price * i.qty, 0);
 
+            const freeItems = useMemo(() => Object.entries(freeCart)
+                .filter(([, qty]) => qty > 0)
+                .map(([key, qty]) => {
+                    const [menuId, serveType] = key.split('|');
+                    const item = menuItems.find(m => m.id === menuId);
+                    return item ? { key, menuId, name: item.name, price: 0, qty, serveType, free: true } : null;
+                })
+                .filter(Boolean), [freeCart, menuItems]);
+            const freeCups = freeItems.reduce((sum, i) => sum + i.qty, 0);
+            const nothingToOrder = cartItems.length === 0 && freeItems.length === 0;
+
             const cleanPhone = phone.replace(/\D/g, '');
 
             // Looked up by document id once the number is long enough to be one, so a member
@@ -1298,36 +1563,52 @@
                 return () => { cancelled = true; };
             }, [cleanPhone]);
 
+            // Free cups belong to the member on the ticket, so changing who that is clears them.
+            // The points this order is about to earn count towards the card right away, so a
+            // customer who reaches ten mid-order can take the free drink on the same ticket.
+            const bankedFree = member ? (member.freeDrinks || 0) : 0;
+            const freeCredit = member ? bankedFree + Math.floor(((member.points || 0) + cups) / MAX_STAMPS_PER_CARD) : 0;
+            const freeLeft = Math.max(0, freeCredit - freeCups);
+            // Taking a paid drink back out can undo the card that was just filled, so the
+            // ticket says so rather than failing at the till.
+            const freeOverLimit = Math.max(0, freeCups - freeCredit);
+            const freeFromThisOrder = Math.max(0, freeCredit - freeDrinkCredit(member));
+            const freePointsSpent = Math.max(0, freeCups - bankedFree) * MAX_STAMPS_PER_CARD;
+            const pointsAfter = member ? Math.max(0, (member.points || 0) + cups - freePointsSpent) : 0;
+            useEffect(() => {
+                if (!member) {
+                    setFreeCart({});
+                    setFreePicking(false);
+                }
+            }, [member]);
+
             // The member box takes a name or a number. A number is also the phone the sale is
             // recorded against, so a new customer can still be signed up by typing theirs in
             // full; a name only identifies someone once they're picked from the matches.
             const [memberQuery, setMemberQuery] = useState('');
             const queryIsPhone = memberQuery.length > 0 && /^\d+$/.test(memberQuery);
             const suggestions = useMemberSearch(memberQuery, customers);
-            // Staff often start with the customer's name instead, so that box offers members too.
-            const nameSuggestions = useMemberSearch(customerName, customers);
-
-            // The name that picking a member filled in, so it can be taken back if the member
-            // box moves on — otherwise the order would still carry a name nobody is linked to.
-            const [pickedName, setPickedName] = useState('');
 
             const changeMemberQuery = (value) => {
                 const isPhone = /^[\d\s-]*$/.test(value);
                 const next = isPhone ? value.replace(/\D/g, '').slice(0, 10) : value;
                 setMemberQuery(next);
                 setPhone(isPhone ? next : '');
-                if (pickedName && customerName === pickedName) setCustomerName('');
-                setPickedName('');
+                // Only a brand-new number needs a name typed in, and that box goes away with it.
+                setCustomerName('');
+                setFreeCart({});
+                setFreePicking(false);
             };
 
             const pickMember = (picked) => {
                 playSound('tap');
+                setFreeCart({});
+                setFreePicking(false);
                 // Shown straight away; the lookup that follows only refreshes it.
                 setMember(picked);
                 setMemberQuery(picked.phone);
                 setPhone(picked.phone);
-                setCustomerName(picked.name || '');
-                setPickedName(picked.name || '');
+                setCustomerName('');
             };
 
             const changeQty = (key, delta) => {
@@ -1335,8 +1616,48 @@
                 setCart(prev => ({ ...prev, [key]: Math.max(0, (prev[key] || 0) + delta) }));
             };
 
+            // Only stamps already on the card can be banked — points this order is about to
+            // earn aren't the customer's until the order is saved.
+            const [banking, setBanking] = useState(false);
+            const canBank = !!member && (member.points || 0) >= MAX_STAMPS_PER_CARD;
+            const handleBankFreeDrink = async () => {
+                if (!canBank || banking) return;
+                const phone = member.phone || member.id;
+                setBanking(true);
+                try {
+                    await bankFreeDrink(phone, member.name);
+                    playSound('redeem');
+                    const refreshed = await lookupCustomer(phone);
+                    if (refreshed) setMember(refreshed);
+                    showToast('เก็บแก้วฟรีไว้ให้ลูกค้าแล้ว');
+                } catch (e) {
+                    showToast('เก็บแก้วฟรีไม่สำเร็จ', 'error');
+                } finally {
+                    setBanking(false);
+                }
+            };
+
+            const changeFreeQty = (key, delta) => {
+                if (delta > 0 && freeLeft <= 0) return;
+                playSound('tap');
+                setFreeCart(prev => ({ ...prev, [key]: Math.max(0, (prev[key] || 0) + delta) }));
+            };
+
+            // While a free drink is being chosen, a tap on the menu puts that drink on the
+            // ticket at no charge instead of selling it.
+            const pickMenu = (key) => {
+                if (!freePicking) {
+                    changeQty(key, 1);
+                    return;
+                }
+                if (freeLeft <= 0) return;
+                playSound('redeem');
+                setFreeCart(prev => ({ ...prev, [key]: (prev[key] || 0) + 1 }));
+                setFreePicking(false);
+            };
+
             const handleSubmit = async () => {
-                if (cartItems.length === 0 || submitting) return;
+                if (nothingToOrder || submitting) return;
                 if (orderType === 'dine-in' && !tableNumber.trim()) {
                     showToast('กรุณาระบุเลขโต๊ะ', 'error');
                     return;
@@ -1345,18 +1666,35 @@
                     showToast('เบอร์สมาชิกไม่ถูกต้อง', 'error');
                     return;
                 }
+                if (freeCups > 0 && !cleanPhone) {
+                    showToast('แก้วฟรีต้องระบุสมาชิกก่อน', 'error');
+                    return;
+                }
+                if (freeOverLimit > 0) {
+                    showToast(`แก้วฟรีเกินสิทธิ์ ${freeOverLimit} แก้ว`, 'error');
+                    return;
+                }
                 setSubmitting(true);
                 try {
                     const orderNumber = await getNextOrderNumber();
-                    const memberName = customerName.trim() || (member ? member.name : '');
+                    const memberName = (member ? member.name : '') || (queryIsPhone ? customerName.trim() : memberQuery.trim());
                     const dayKey = dateKey(new Date());
-                    await db.collection('orders').add({
-                        orderNumber,
-                        items: cartItems.map(({ menuId, name, price, qty, serveType, addon }) => ({
+                    // Free cups sit on the same ticket at zero baht, flagged so the report
+                    // counts them as given away rather than sold.
+                    const lines = [
+                        ...cartItems.map(({ menuId, name, price, qty, serveType, addon }) => ({
                             menuId, name, price, qty,
                             ...(serveType ? { serveType } : {}),
                             ...(addon ? { addon: true } : {}),
                         })),
+                        ...freeItems.map(({ menuId, name, qty, serveType }) => ({
+                            menuId, name, price: 0, qty, free: true,
+                            ...(serveType ? { serveType } : {}),
+                        })),
+                    ];
+                    await db.collection('orders').add({
+                        orderNumber,
+                        items: lines,
                         total,
                         orderType,
                         tableNumber: orderType === 'dine-in' ? tableNumber.trim() : '',
@@ -1366,29 +1704,40 @@
                         status: 'new',
                         itemCount: cups,
                         pointsAwarded: cleanPhone ? cups : 0,
+                        ...(freeCups ? { freeCount: freeCups } : {}),
                         dayKey,
                         createdAt: firebase.firestore.FieldValue.serverTimestamp(),
                         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
                     });
-                    // Both of these run after the order is safely saved, so neither may report
+                    // These run after the order is safely saved, so none of them may report
                     // the sale as failed — that would invite staff to key the whole thing in
                     // a second time.
-                    recordSale(dayKey, { items: cartItems, total }, 1)
+                    recordSale(dayKey, { items: lines, total }, 1)
                         .catch(() => showToast('ออเดอร์บันทึกแล้ว แต่ยอดขายในรายงานไม่อัปเดต', 'error'));
+                    let message = `บันทึกออเดอร์ #${orderNumber} สำเร็จ`;
                     if (cleanPhone) {
                         try {
                             await earnPointsForOrder(cleanPhone, memberName, cups, orderNumber);
                             playSound('stamp');
-                            showToast(cups > 0
-                                ? `บันทึกออเดอร์ #${orderNumber} · สะสม +${cups} แต้ม`
-                                : `บันทึกออเดอร์ #${orderNumber} สำเร็จ`);
+                            if (cups > 0) message = `บันทึกออเดอร์ #${orderNumber} · สะสม +${cups} แต้ม`;
                         } catch (e) {
                             showToast(`บันทึกออเดอร์ #${orderNumber} แล้ว แต่สะสมแต้มไม่สำเร็จ`, 'error');
+                            message = '';
                         }
-                    } else {
-                        showToast(`บันทึกออเดอร์ #${orderNumber} สำเร็จ`);
                     }
+                    if (freeCups > 0) {
+                        try {
+                            await spendFreeDrinks(cleanPhone, memberName, freeCups, freeItems.map(i => itemLabel(i)).join(', '));
+                            if (message) message += ` · แก้วฟรี ${freeCups} แก้ว`;
+                        } catch (e) {
+                            showToast(`บันทึกออเดอร์ #${orderNumber} แล้ว แต่ตัดสิทธิ์แก้วฟรีไม่สำเร็จ`, 'error');
+                            message = '';
+                        }
+                    }
+                    if (message) showToast(message);
                     setCart({});
+                    setFreeCart({});
+                    setFreePicking(false);
                     setTableNumber('');
                     setCustomerName('');
                     changeMemberQuery('');
@@ -1408,6 +1757,21 @@
                             <h2 className="text-2xl font-bold text-stone-800">ขายหน้าร้าน</h2>
                             <p className="text-xs text-stone-400 mt-0.5">กดเลือกเมนูเพื่อเปิดออเดอร์ให้ลูกค้าที่หน้าร้าน</p>
                         </div>
+
+                        {freePicking && (
+                            <div className="bg-sky-100 border border-sky-300 rounded-2xl px-4 py-3 flex items-center justify-between gap-3">
+                                <div className="flex items-center space-x-2 min-w-0">
+                                    <Icon name="gift" className="w-5 h-5 text-sky-800 shrink-0"></Icon>
+                                    <p className="text-sm font-bold text-sky-900 truncate">แตะเมนูที่จะให้ฟรี 1 แก้ว</p>
+                                </div>
+                                <button
+                                    onClick={() => setFreePicking(false)}
+                                    className="shrink-0 px-3 py-1.5 rounded-xl bg-white text-sky-900 text-xs font-bold border border-sky-300"
+                                >
+                                    ยกเลิก
+                                </button>
+                            </div>
+                        )}
 
                         {Object.keys(grouped).length === 0 ? (
                             <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
@@ -1431,7 +1795,7 @@
                                             return (
                                                 <div
                                                     key={item.id}
-                                                    onClick={choose ? undefined : () => changeQty(singleKey, 1)}
+                                                    onClick={choose ? undefined : () => pickMenu(singleKey)}
                                                     className={`relative p-3 rounded-2xl border text-left transition-all ${choose ? '' : 'cursor-pointer active:scale-95'} ${
                                                         qty > 0
                                                             ? 'bg-amber-50 border-amber-300 shadow-sm'
@@ -1450,7 +1814,7 @@
                                                                 return (
                                                                     <button
                                                                         key={t}
-                                                                        onClick={() => changeQty(cartKey(item.id, t), 1)}
+                                                                        onClick={() => pickMenu(cartKey(item.id, t))}
                                                                         className={`py-1.5 rounded-lg text-[11px] font-semibold leading-tight transition-all active:scale-95 ${
                                                                             optQty > 0 ? 'bg-amber-300 text-amber-950' : 'bg-stone-100 text-stone-600 hover:bg-amber-100'
                                                                         }`}
@@ -1478,7 +1842,7 @@
                         <div className="bg-white rounded-3xl p-6 shadow-sm border border-stone-100 space-y-4 lg:sticky lg:top-0">
                             <h3 className="font-bold text-sm uppercase tracking-wider text-stone-500">รายการที่สั่ง</h3>
 
-                            {cartItems.length === 0 ? (
+                            {nothingToOrder ? (
                                 <p className="text-sm text-stone-400 text-center py-6">ยังไม่ได้เลือกเมนู</p>
                             ) : (
                                 <div className="space-y-2 max-h-64 overflow-y-auto">
@@ -1499,12 +1863,51 @@
                                             </div>
                                         </div>
                                     ))}
+                                    {freeItems.map(item => (
+                                        <div key={`free-${item.key}`} className="flex items-center justify-between gap-2">
+                                            <div className="min-w-0 pr-1">
+                                                <p className="text-sm font-medium text-stone-700 truncate">
+                                                    {itemLabel(item)}
+                                                    <span className="ml-1.5 text-[10px] font-bold bg-sky-200 text-sky-900 rounded px-1.5 py-0.5 align-middle">ฟรี</span>
+                                                </p>
+                                                <p className="text-xs text-sky-700">แก้วฟรีจากแต้มสะสม · 0 บาท</p>
+                                            </div>
+                                            <div className="shrink-0 flex items-center space-x-2 bg-sky-50 rounded-xl px-1.5 py-1.5">
+                                                <button onClick={() => changeFreeQty(item.key, -1)} className="w-7 h-7 rounded-lg bg-white text-stone-600 flex items-center justify-center shadow-sm active:scale-90">
+                                                    <Icon name="minus" className="w-4 h-4"></Icon>
+                                                </button>
+                                                <span className="w-5 text-center font-bold text-sky-900 text-sm">{item.qty}</span>
+                                                <button
+                                                    onClick={() => changeFreeQty(item.key, 1)}
+                                                    disabled={freeLeft <= 0}
+                                                    className={`w-7 h-7 rounded-lg flex items-center justify-center shadow-sm active:scale-90 ${
+                                                        freeLeft > 0 ? 'bg-white text-stone-600' : 'bg-stone-100 text-stone-300 cursor-not-allowed'
+                                                    }`}
+                                                >
+                                                    <Icon name="plus" className="w-4 h-4"></Icon>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
                                 </div>
                             )}
 
-                            <div className="flex justify-between items-center pt-3 border-t border-stone-100">
-                                <span className="text-sm font-bold text-stone-700">ยอดรวม</span>
-                                <span className="text-xl font-extrabold text-amber-700">{total.toLocaleString()} บาท</span>
+                            <div className="pt-3 border-t border-stone-100 space-y-1">
+                                <div className="flex justify-between items-center">
+                                    <span className="text-sm font-bold text-stone-700">ยอดรวม</span>
+                                    <span className="text-xl font-extrabold text-amber-700">{total.toLocaleString()} บาท</span>
+                                </div>
+                                {freeCups > 0 && (
+                                    <div className="flex justify-between items-center text-[11px] font-semibold text-sky-800">
+                                        <span>แก้วฟรีในออเดอร์นี้</span>
+                                        <span>{freeCups} แก้ว · ไม่คิดเงิน</span>
+                                    </div>
+                                )}
+                                {freeOverLimit > 0 && (
+                                    <p className="text-[11px] font-semibold text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+                                        แก้วฟรีเกินสิทธิ์ {freeOverLimit} แก้ว · ลบออกก่อนบันทึก
+                                    </p>
+                                )}
                             </div>
 
                             <div className="grid grid-cols-2 gap-2">
@@ -1530,7 +1933,7 @@
                             )}
 
                             <div>
-                                <label className="block text-xs font-semibold text-stone-500 uppercase tracking-wider mb-1.5">สมาชิก (ถ้ามี)</label>
+                                <label className="block text-xs font-semibold text-stone-500 uppercase tracking-wider mb-1.5">ลูกค้า · ชื่อหรือเบอร์ (ถ้ามี)</label>
                                 <div className="relative">
                                     <input
                                         type="text"
@@ -1575,34 +1978,73 @@
                                             <span>สั่งไปแล้ว {member.totalDrinks || 0} แก้ว ({member.orderCount || 0} ครั้ง)</span>
                                             <span>ล่าสุด {member.lastVisit ? member.lastVisit.split(' ')[0] : '-'}</span>
                                         </div>
-                                        {(member.freeDrinks > 0 || member.freeDrinksRedeemed > 0) && (
+                                        {freeCredit > 0 ? (
+                                            <div className="bg-white border-2 border-sky-400 rounded-2xl p-3 space-y-2">
+                                                <div className="flex items-start space-x-2">
+                                                    <Icon name="party-popper" className="w-5 h-5 text-sky-700 shrink-0"></Icon>
+                                                    <div className="min-w-0">
+                                                        <p className="font-bold text-stone-800 text-sm">
+                                                            ลูกค้ารับแก้วฟรีได้ {freeLeft} แก้ว
+                                                        </p>
+                                                        <p className="text-[11px] text-stone-500">
+                                                            รับไปแล้ว {member.freeDrinksRedeemed || 0} แก้ว{freeCups > 0 ? ` · ใส่ในออเดอร์นี้แล้ว ${freeCups} แก้ว` : ''}
+                                                        </p>
+                                                        {freeFromThisOrder > 0 && (
+                                                            <p className="text-[11px] font-semibold text-emerald-700 mt-0.5">
+                                                                รวมแต้มจากออเดอร์นี้แล้ว (บัตรเต็มระหว่างสั่ง)
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <button
+                                                    onClick={() => { playSound('tap'); setFreePicking(p => !p); }}
+                                                    disabled={freeLeft <= 0}
+                                                    className={`w-full py-2.5 rounded-xl text-sm font-bold transition-all active:scale-95 ${
+                                                        freeLeft <= 0
+                                                            ? 'bg-stone-100 text-stone-400 cursor-not-allowed'
+                                                            : freePicking
+                                                                ? 'bg-white border-2 border-sky-400 text-sky-900'
+                                                                : 'bg-sky-300 hover:bg-sky-400 text-sky-950'
+                                                    }`}
+                                                >
+                                                    {freeLeft <= 0 ? 'ใช้ครบแล้ว' : freePicking ? 'กำลังเลือก... (กดเพื่อยกเลิก)' : 'ใช้แก้วฟรีในออเดอร์นี้'}
+                                                </button>
+                                                {canBank && (
+                                                    <button
+                                                        onClick={handleBankFreeDrink}
+                                                        disabled={banking}
+                                                        className="w-full py-2 rounded-xl text-xs font-bold bg-white border border-stone-200 text-stone-700 hover:bg-stone-50 active:scale-95 transition-all"
+                                                    >
+                                                        {banking ? 'กำลังบันทึก...' : 'ยังไม่รับ · เก็บไว้ก่อน'}
+                                                    </button>
+                                                )}
+                                                <p className="text-[10px] text-stone-400 text-center">
+                                                    รับกี่แก้วก็ได้ ที่เหลือระบบเก็บไว้ให้ · ไม่รับเลยก็ได้ แต้มไม่หาย
+                                                </p>
+                                            </div>
+                                        ) : (member.freeDrinksRedeemed > 0 && (
                                             <p className="text-[11px] font-semibold text-sky-800 bg-sky-100 rounded-lg px-2 py-1">
-                                                แก้วฟรี: รับไปแล้ว {member.freeDrinksRedeemed || 0} · ยังไม่ได้รับ {member.freeDrinks || 0} แก้ว
+                                                แก้วฟรี: รับไปแล้ว {member.freeDrinksRedeemed || 0} แก้ว
                                             </p>
-                                        )}
-                                        {cups > 0 && (
+                                        ))}
+                                        {(cups > 0 || freeCups > 0) && (
                                             <p className="text-[11px] font-semibold text-emerald-700">
-                                                ออเดอร์นี้ +{cups} แต้ม → รวมเป็น {(member.points || 0) + cups} แต้ม
+                                                ออเดอร์นี้ +{cups} แต้ม{freePointsSpent > 0 ? ` · ใช้แก้วฟรี -${freePointsSpent} แต้ม` : ''} → เหลือ {pointsAfter} แต้ม
                                             </p>
                                         )}
                                     </div>
                                 ) : cleanPhone.length >= 9 ? (
-                                    <div className="mt-2 bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2 text-xs text-amber-800">
-                                        เบอร์ใหม่ · จะสมัครสมาชิกให้อัตโนมัติ{cups > 0 ? ` และรับ +${cups} แต้ม` : ''}
+                                    <div className="mt-2 bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2 space-y-2">
+                                        <p className="text-xs text-amber-800">
+                                            เบอร์ใหม่ · จะสมัครสมาชิกให้อัตโนมัติ{cups > 0 ? ` และรับ +${cups} แต้ม` : ''}
+                                        </p>
+                                        <input
+                                            type="text" value={customerName} onChange={e => setCustomerName(e.target.value)}
+                                            placeholder="ชื่อลูกค้า (ถ้ามี)"
+                                            className="w-full bg-white border border-amber-200 rounded-xl px-3 py-2 text-sm text-stone-800 focus:ring-2 focus:ring-amber-400 outline-none"
+                                        />
                                     </div>
                                 ) : null}
-                            </div>
-
-                            <div>
-                                <input
-                                    type="text" value={customerName} onChange={e => setCustomerName(e.target.value)} placeholder="ชื่อลูกค้า (ถ้ามี)"
-                                    className="w-full bg-stone-100 border-none rounded-2xl px-4 py-3 text-sm text-stone-800 focus:ring-2 focus:ring-amber-500 outline-none"
-                                />
-                                {!member && !memberQuery && (
-                                    <div className="mt-2">
-                                        <MemberSuggestions members={nameSuggestions} onPick={pickMember} formatPhone={formatPhone} />
-                                    </div>
-                                )}
                             </div>
 
                             <input
@@ -1612,9 +2054,9 @@
 
                             <button
                                 onClick={handleSubmit}
-                                disabled={cartItems.length === 0 || submitting}
+                                disabled={nothingToOrder || submitting || freeOverLimit > 0}
                                 className={`w-full py-4 rounded-2xl font-bold text-base shadow-sm transition-all flex items-center justify-center space-x-2 ${
-                                    cartItems.length > 0 && !submitting
+                                    !nothingToOrder && !submitting && freeOverLimit === 0
                                         ? 'bg-amber-300 hover:bg-amber-400 text-amber-950 active:scale-95'
                                         : 'bg-stone-200 text-stone-400 cursor-not-allowed'
                                 }`}
@@ -1845,8 +2287,8 @@
 
         function POSView({
             phoneInput, setPhoneInput, handleNumpad, handleSearchCustomer,
-            selectedCustomer, setSelectedPhone, handleAddPoints, handleCompleteCard, handleUseFreeDrink,
-            setShowNewCustomerModal, setShowRedeemModal, formatPhone, maxStampsPerCard, customers
+            selectedCustomer, setSelectedPhone, handleAddPoints, handleKeepFreeDrink, onGiveFreeDrink,
+            setShowNewCustomerModal, setShowRedeemModal, formatPhone, customers
         }) {
             const matches = useMemberSearch(phoneInput, customers);
 
@@ -1977,8 +2419,8 @@
                                     </div>
 
                                     <div className="grid grid-cols-5 gap-3 my-2">
-                                        {Array.from({ length: maxStampsPerCard }).map((_, index) => {
-                                            const isStamped = index < (selectedCustomer.points % maxStampsPerCard || (selectedCustomer.points > 0 && selectedCustomer.points % maxStampsPerCard === 0 ? maxStampsPerCard : 0));
+                                        {Array.from({ length: MAX_STAMPS_PER_CARD }).map((_, index) => {
+                                            const isStamped = index < (selectedCustomer.points % MAX_STAMPS_PER_CARD || (selectedCustomer.points > 0 && selectedCustomer.points % MAX_STAMPS_PER_CARD === 0 ? MAX_STAMPS_PER_CARD : 0));
                                             return (
                                                 <div
                                                     key={index}
@@ -1999,33 +2441,33 @@
                                     </div>
 
                                     <div className="mt-4 pt-3 border-t border-sky-300 flex justify-between items-center text-[11px] text-sky-700">
-                                        <span>สะสมครบ {maxStampsPerCard} แต้ม รับเครื่องดื่มฟรี!</span>
+                                        <span>สะสมครบ {MAX_STAMPS_PER_CARD} แต้ม รับเครื่องดื่มฟรี!</span>
                                         <span>สั่งไปแล้ว {selectedCustomer.totalDrinks || 0} แก้ว ({selectedCustomer.orderCount || 0} ครั้ง)</span>
                                     </div>
                                 </div>
 
-                                {(selectedCustomer.points || 0) >= maxStampsPerCard && (
+                                {(selectedCustomer.points || 0) >= MAX_STAMPS_PER_CARD && (
                                     <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-3">
                                         <div className="flex items-start space-x-2">
                                             <Icon name="party-popper" className="w-5 h-5 text-amber-700 shrink-0"></Icon>
                                             <div>
                                                 <p className="font-bold text-stone-800 text-sm">
-                                                    สะสมครบแล้ว! รับเครื่องดื่มฟรีได้ {Math.floor((selectedCustomer.points || 0) / maxStampsPerCard)} แก้ว
+                                                    สะสมครบแล้ว! รับเครื่องดื่มฟรีได้ {Math.floor((selectedCustomer.points || 0) / MAX_STAMPS_PER_CARD)} แก้ว
                                                 </p>
                                                 <p className="text-[11px] text-stone-500 mt-0.5">
-                                                    ถ้ายังไม่รับตอนนี้ ระบบจะเก็บแก้วฟรีไว้ให้ แล้วเริ่มสะสมบัตรใบใหม่ต่อได้เลย
+                                                    กด "รับเลย" แล้วเลือกเมนู ระบบจะบันทึกเป็นออเดอร์ 0 บาทให้ · รับทีละแก้วได้ ที่เหลือกด "เก็บไว้ก่อน" เก็บไว้ใช้วันหลัง
                                                 </p>
                                             </div>
                                         </div>
                                         <div className="grid grid-cols-2 gap-2">
                                             <button
-                                                onClick={() => handleCompleteCard(false)}
+                                                onClick={onGiveFreeDrink}
                                                 className="py-3 bg-sky-300 hover:bg-sky-400 text-sky-950 rounded-2xl text-sm font-bold active:scale-95 transition-all"
                                             >
-                                                รับเลย
+                                                รับเลย (เลือกเมนู)
                                             </button>
                                             <button
-                                                onClick={() => handleCompleteCard(true)}
+                                                onClick={handleKeepFreeDrink}
                                                 className="py-3 bg-white border border-stone-200 hover:bg-stone-50 text-stone-700 rounded-2xl text-sm font-bold active:scale-95 transition-all"
                                             >
                                                 เก็บไว้ก่อน
@@ -2051,7 +2493,7 @@
                                     </div>
                                     {selectedCustomer.freeDrinks > 0 && (
                                         <button
-                                            onClick={handleUseFreeDrink}
+                                            onClick={onGiveFreeDrink}
                                             className="shrink-0 px-4 py-2.5 bg-sky-300 hover:bg-sky-400 text-sky-950 rounded-2xl text-sm font-bold active:scale-95 transition-all"
                                         >
                                             ใช้ 1 แก้ว
@@ -2486,13 +2928,19 @@
                     .map(([key, item]) => ({ key, ...item }))
                     .filter(item => item.qty > 0)
                     .sort((a, b) => b.qty - a.qty);
+                const freeItems = Object.entries(day.freeItems || {})
+                    .map(([key, item]) => ({ key, ...item }))
+                    .filter(item => item.qty > 0)
+                    .sort((a, b) => b.qty - a.qty);
                 return {
                     date: day.date,
                     count: day.orderCount || 0,
                     revenue: day.revenue || 0,
                     cancelledCount: day.cancelledCount || 0,
                     cups: cupsIn(day, addonIds),
+                    freeCups: freeCupsIn(day),
                     items,
+                    freeItems,
                 };
             }).sort((a, b) => b.date.localeCompare(a.date)), [dailySales, addonIds]);
 
@@ -2503,9 +2951,10 @@
                 dailySales.forEach(day => {
                     const month = (day.date || '').slice(0, 7);
                     if (!month) return;
-                    if (!map[month]) map[month] = { month, orderCount: 0, cups: 0, revenue: 0 };
+                    if (!map[month]) map[month] = { month, orderCount: 0, cups: 0, freeCups: 0, revenue: 0 };
                     map[month].orderCount += day.orderCount || 0;
                     map[month].cups += cupsIn(day, addonIds);
+                    map[month].freeCups += freeCupsIn(day);
                     map[month].revenue += day.revenue || 0;
                 });
                 const ascending = Object.values(map).sort((a, b) => a.month.localeCompare(b.month));
@@ -2551,6 +3000,36 @@
             const bestSellers = best.ranked;
             const bestTotals = { qty: best.cups, revenue: best.revenue };
 
+            // Free drinks are read from their own tally, so they never inflate what sold. The
+            // value is what those cups would have rung up at today's prices — an idea of what
+            // the loyalty card costs the shop, not money that ever changed hands.
+            const [freePeriod, setFreePeriod] = useState(30);
+            const freeStats = useMemo(() => {
+                const start = new Date();
+                start.setDate(start.getDate() - (freePeriod - 1));
+                const cutoff = dateKey(start);
+                const map = {};
+                let cups = 0;
+                let value = 0;
+                dailySales.forEach(day => {
+                    if (!day.date || day.date < cutoff) return;
+                    Object.entries(day.freeItems || {}).forEach(([key, item]) => {
+                        if (!(item.qty > 0)) return;
+                        const menuItem = menuItems.find(m => m.id === key.split('__')[0]);
+                        const worth = (menuItem ? priceFor(menuItem, item.serveType) : 0) * item.qty;
+                        if (!map[item.name]) map[item.name] = { name: item.name, qty: 0, value: 0, byServe: {} };
+                        const entry = map[item.name];
+                        entry.qty += item.qty;
+                        entry.value += worth;
+                        if (item.serveType) entry.byServe[item.serveType] = (entry.byServe[item.serveType] || 0) + item.qty;
+                        cups += item.qty;
+                        value += worth;
+                    });
+                });
+                return { ranked: Object.values(map).sort((a, b) => b.qty - a.qty), cups, value };
+            }, [dailySales, freePeriod, menuItems]);
+            const freeCupsAllTime = useMemo(() => dailySales.reduce((sum, day) => sum + freeCupsIn(day), 0), [dailySales]);
+
             return (
                 <div className="max-w-5xl mx-auto space-y-6">
                     <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
@@ -2592,6 +3071,7 @@
                                                 <th className="font-semibold pb-2">เดือน</th>
                                                 <th className="font-semibold pb-2 text-right">ออเดอร์</th>
                                                 <th className="font-semibold pb-2 text-right">แก้ว</th>
+                                                <th className="font-semibold pb-2 text-right">แจกฟรี</th>
                                                 <th className="font-semibold pb-2 text-right">ยอดขาย</th>
                                                 <th className="font-semibold pb-2 text-right">เทียบเดือนก่อน</th>
                                             </tr>
@@ -2602,6 +3082,9 @@
                                                     <td className="py-2 font-semibold text-stone-700">{monthLabel(month.month)}</td>
                                                     <td className="py-2 text-right text-stone-500">{month.orderCount.toLocaleString()}</td>
                                                     <td className="py-2 text-right text-stone-600 font-semibold">{month.cups.toLocaleString()}</td>
+                                                    <td className={`py-2 text-right font-semibold ${month.freeCups > 0 ? 'text-sky-700' : 'text-stone-300'}`}>
+                                                        {month.freeCups > 0 ? month.freeCups.toLocaleString() : '-'}
+                                                    </td>
                                                     <td className="py-2 text-right font-bold text-amber-700">{month.revenue.toLocaleString()}</td>
                                                     <td className={`py-2 text-right font-semibold ${
                                                         month.change === null ? 'text-stone-300' : month.change >= 0 ? 'text-emerald-600' : 'text-red-500'
@@ -2692,6 +3175,77 @@
                         )}
                     </div>
 
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100 space-y-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                            <h3 className="font-bold text-sm uppercase tracking-wider text-stone-500">แก้วฟรีที่แจก</h3>
+                            <div className="flex gap-1 bg-stone-100 rounded-xl p-1">
+                                {BEST_SELLER_PERIODS.map(period => (
+                                    <button
+                                        key={period.days}
+                                        onClick={() => setFreePeriod(period.days)}
+                                        className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+                                            freePeriod === period.days ? 'bg-white text-stone-800 shadow-sm' : 'text-stone-500 hover:text-stone-700'
+                                        }`}
+                                    >
+                                        {period.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-3">
+                            <div className="bg-sky-50 rounded-2xl p-3">
+                                <p className="text-[11px] text-stone-500">แจกไปในช่วงนี้</p>
+                                <p className="text-lg font-extrabold text-sky-900">{freeStats.cups.toLocaleString()} <span className="text-xs font-normal">แก้ว</span></p>
+                            </div>
+                            <div className="bg-sky-50 rounded-2xl p-3">
+                                <p className="text-[11px] text-stone-500">มูลค่าโดยประมาณ</p>
+                                <p className="text-lg font-extrabold text-sky-900">{freeStats.value.toLocaleString()} <span className="text-xs font-normal">บาท</span></p>
+                            </div>
+                            <div className="bg-stone-50 rounded-2xl p-3">
+                                <p className="text-[11px] text-stone-500">แจกทั้งหมด</p>
+                                <p className="text-lg font-extrabold text-stone-700">{freeCupsAllTime.toLocaleString()} <span className="text-xs font-normal">แก้ว</span></p>
+                            </div>
+                        </div>
+
+                        {freeStats.ranked.length === 0 ? (
+                            <p className="text-sm text-stone-400 text-center py-6">ยังไม่มีแก้วฟรีในช่วงนี้</p>
+                        ) : (
+                            <div className="space-y-3">
+                                {freeStats.ranked.slice(0, 10).map((item, index) => (
+                                    <div key={item.name} className="space-y-1">
+                                        <div className="flex items-center justify-between gap-3 text-sm">
+                                            <div className="flex items-center gap-2 min-w-0">
+                                                <span className="w-6 h-6 rounded-lg text-xs font-bold flex items-center justify-center shrink-0 bg-sky-200 text-sky-900">
+                                                    {index + 1}
+                                                </span>
+                                                <span className="font-semibold text-stone-800 truncate">{item.name}</span>
+                                                {Object.keys(item.byServe).length > 0 && (
+                                                    <span className="text-[11px] text-stone-400 shrink-0">
+                                                        {SERVE_TYPES.filter(t => item.byServe[t.key]).map(t => `${t.label} ${item.byServe[t.key]}`).join(' · ')}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="text-right shrink-0">
+                                                <span className="font-bold text-stone-800">{item.qty}</span>
+                                                <span className="text-xs text-stone-400"> แก้ว · ~{item.value.toLocaleString()}฿</span>
+                                            </div>
+                                        </div>
+                                        <div className="h-1.5 bg-stone-100 rounded-full overflow-hidden ml-8">
+                                            <div
+                                                className="h-full rounded-full bg-sky-300"
+                                                style={{ width: `${(item.qty / freeStats.ranked[0].qty) * 100}%` }}
+                                            ></div>
+                                        </div>
+                                    </div>
+                                ))}
+                                <p className="text-[11px] text-stone-400">
+                                    มูลค่าคิดจากราคาขายปัจจุบัน · ยอดขายและรายรับไม่รวมแก้วฟรี
+                                </p>
+                            </div>
+                        )}
+                    </div>
+
                     <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100 space-y-2">
                         <h3 className="font-bold text-stone-800 mb-2 text-sm uppercase tracking-wider text-stone-500">สรุปยอดขายรายวัน</h3>
                         {salesByDay.length === 0 ? (
@@ -2704,7 +3258,9 @@
                                             <div>
                                                 <p className="font-semibold text-stone-700 text-sm">{day.date}</p>
                                                 <p className="text-xs text-stone-400">
-                                                    {day.count} ออเดอร์ · <span className="font-semibold text-stone-600">{day.cups.toLocaleString()} แก้ว</span>{day.cancelledCount > 0 ? ` · ยกเลิก ${day.cancelledCount}` : ''}
+                                                    {day.count} ออเดอร์ · <span className="font-semibold text-stone-600">{day.cups.toLocaleString()} แก้ว</span>
+                                                    {day.freeCups > 0 && <span className="font-semibold text-sky-700"> · แจกฟรี {day.freeCups} แก้ว</span>}
+                                                    {day.cancelledCount > 0 ? ` · ยกเลิก ${day.cancelledCount}` : ''}
                                                 </p>
                                             </div>
                                             <span className="font-bold text-amber-700">{day.revenue.toLocaleString()} บาท</span>
@@ -2716,6 +3272,16 @@
                                                         {item.name}{item.serveType ? ` (${serveLabel(item.serveType)})` : ''}
                                                         <span className="font-bold text-stone-800"> ×{item.qty}</span>
                                                         <span className="text-stone-400"> · {item.revenue.toLocaleString()}฿</span>
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {day.freeItems.length > 0 && (
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {day.freeItems.map(item => (
+                                                    <span key={`free-${item.key}`} className="bg-sky-50 border border-sky-200 rounded-lg px-2 py-1 text-[11px] text-sky-800">
+                                                        แก้วฟรี · {item.name}{item.serveType ? ` (${serveLabel(item.serveType)})` : ''}
+                                                        <span className="font-bold"> ×{item.qty}</span>
                                                     </span>
                                                 ))}
                                             </div>
@@ -2876,7 +3442,7 @@
                                                 <div key={order.id} className="px-4 py-2.5 flex items-center justify-between text-sm gap-3 bg-emerald-50/40">
                                                     <span className="text-stone-600 min-w-0 truncate flex items-center gap-1.5">
                                                         <Icon name="shopping-bag" className="w-3.5 h-3.5 text-emerald-600 shrink-0"></Icon>
-                                                        ขาย #{order.orderNumber} · {order.items.map(i => `${itemLabel(i)} x${i.qty}`).join(', ')}
+                                                        {order.items.every(i => i.free) ? 'แก้วฟรี' : 'ขาย'} #{order.orderNumber} · {order.items.map(i => `${itemLabel(i)} x${i.qty}${i.free ? ' (ฟรี)' : ''}`).join(', ')}
                                                     </span>
                                                     <div className="flex items-center space-x-3 shrink-0">
                                                         <span className="font-semibold text-emerald-600">+{(order.total || 0).toLocaleString()} บาท</span>

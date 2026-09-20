@@ -43,7 +43,8 @@ service cloud.firestore {
     match /dailySales/{day} {
       allow read: if true;
       allow write: if request.resource.data.keys().hasOnly(
-          ['date', 'orderCount', 'cancelledCount', 'revenue', 'items', 'manualIncome', 'manualExpense'])
+          ['date', 'orderCount', 'cancelledCount', 'revenue', 'items', 'freeItems', 'freeCount',
+           'manualIncome', 'manualExpense'])
         && request.resource.data.date is string;
       allow delete: if false;
     }
